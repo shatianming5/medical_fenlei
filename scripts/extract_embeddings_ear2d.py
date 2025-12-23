@@ -124,13 +124,7 @@ def main(
     )
 
     model_spec = ckpt.get("model_spec") or (cfg.get("model") or {}).get("spec") or {}
-    model = SliceAttentionResNet(
-        backbone=str(model_spec.get("backbone", "resnet18")),
-        in_channels=1,
-        attn_hidden=int(model_spec.get("attn_hidden", 128)),
-        dropout=float(model_spec.get("dropout", 0.2)),
-        out_dim=int(model_spec.get("out_dim", 1)),
-    )
+    model = SliceAttentionResNet.from_spec(model_spec, in_channels=1)
     model.load_state_dict(ckpt["state_dict"], strict=True)
 
     train_csv = splits_root / f"{pct}pct" / "train.csv"

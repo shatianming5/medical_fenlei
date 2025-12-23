@@ -207,8 +207,14 @@ def main(
     output_dir: Path | None = typer.Option(None, help="输出目录（默认 outputs/...；不入库）"),
     label_task: str = typer.Option("normal_vs_diseased", help="二分类任务名（见 src/medical_fenlei/tasks.py）"),
     backbone: str = typer.Option("resnet18", help="resnet18 | resnet34 | resnet50"),
+    aggregator: str = typer.Option("attention", help="z 聚合方式：attention | transformer | mean"),
     attn_hidden: int = typer.Option(128),
     dropout: float = typer.Option(0.2),
+    transformer_layers: int = typer.Option(0, help="仅当 aggregator=transformer 时启用（建议 1~2）"),
+    transformer_heads: int = typer.Option(8),
+    transformer_ff_dim: int = typer.Option(0, help="Transformer FFN 维度（0 表示自动=4*embed_dim）"),
+    transformer_dropout: float = typer.Option(0.1),
+    transformer_max_len: int = typer.Option(256),
     epochs: int = typer.Option(50),
     batch_size: int = typer.Option(16),
     grad_accum: int = typer.Option(1, help="梯度累积步数（显存不够时用）"),
@@ -351,9 +357,15 @@ def main(
     model = SliceAttentionResNet(
         backbone=str(backbone),
         in_channels=1,
+        aggregator=str(aggregator),
         attn_hidden=int(attn_hidden),
         dropout=float(dropout),
         out_dim=1,
+        transformer_layers=int(transformer_layers),
+        transformer_heads=int(transformer_heads),
+        transformer_ff_dim=int(transformer_ff_dim),
+        transformer_dropout=float(transformer_dropout),
+        transformer_max_len=int(transformer_max_len),
     ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))

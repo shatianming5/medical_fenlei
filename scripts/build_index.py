@@ -39,7 +39,18 @@ def main(
 
     typer.echo(f"dicom_root: {dicom_root}")
     typer.echo(f"labels: {len(labels)} rows")
+    typer.echo(f"labels unique exam_id: {labels['exam_id'].nunique()}")
     typer.echo(f"matched: {len(index)} rows")
+    if not index.empty and "date_match" in index.columns:
+        n_date_match = int(index["date_match"].fillna(False).sum())
+        n_mismatch = int(len(index) - n_date_match)
+        typer.echo(f"date_match: {n_date_match}  date_mismatch: {n_mismatch}")
+    if not index.empty and "ambiguous_match" in index.columns:
+        typer.echo(f"ambiguous_match: {int(index['ambiguous_match'].fillna(False).sum())}")
+    if not index.empty:
+        label_exam_ids = set(labels["exam_id"].astype("int64").tolist())
+        matched_exam_ids = set(index["exam_id"].astype("int64").tolist())
+        typer.echo(f"labels missing in index: {len(label_exam_ids - matched_exam_ids)}")
     typer.echo(f"saved: {out_csv}")
 
 

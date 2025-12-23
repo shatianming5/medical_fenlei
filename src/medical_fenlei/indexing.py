@@ -1,8 +1,18 @@
 from __future__ import annotations
 
+from collections import defaultdict
+from datetime import date
 from pathlib import Path
+import re
 
 import pandas as pd
+
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _is_date_dir(name: str) -> bool:
+    return bool(_DATE_RE.match(name))
 
 
 def _count_dcm_files(series_dir: Path) -> int:
@@ -27,6 +37,64 @@ def _pick_series_dir(exam_dir: Path) -> tuple[Path | None, int]:
     return best, max(best_n, 0)
 
 
+def _parse_iso_date(value: str) -> date | None:
+    try:
+        return date.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _build_exam_dir_lookup(dicom_root: Path) -> dict[int, list[Path]]:
+    """
+    Build a lookup from exam_id -> list[exam_dir] by scanning dicom_root/*/*.
+
+    The dataset layout is assumed to be:
+      dicom_root/<YYYY-MM-DD>/<exam_id>/<series_id>/*.dcm
+    """
+    lookup: dict[int, list[Path]] = defaultdict(list)
+
+    for d in dicom_root.iterdir():
+        if not d.is_dir() or d.name.startswith("."):
+            continue
+        if not _is_date_dir(d.name):
+            continue
+        for e in d.iterdir():
+            if not e.is_dir() or e.name.startswith("."):
+                continue
+            try:
+                exam_id = int(e.name)
+            except Exception:
+                continue
+            lookup[exam_id].append(e)
+
+    return dict(lookup)
+
+
+def _resolve_exam_dir(exam_dirs: list[Path], *, label_date: str | None) -> tuple[Path, bool]:
+    if len(exam_dirs) == 1:
+        return exam_dirs[0], False
+
+    if label_date:
+        for cand in exam_dirs:
+            if cand.parent.name == label_date:
+                return cand, False
+
+        label_dt = _parse_iso_date(label_date)
+        if label_dt is not None:
+            scored: list[tuple[int, Path]] = []
+            for cand in exam_dirs:
+                cand_dt = _parse_iso_date(cand.parent.name)
+                if cand_dt is None:
+                    continue
+                scored.append((abs((cand_dt - label_dt).days), cand))
+            if scored:
+                scored.sort(key=lambda x: x[0])
+                return scored[0][1], True
+
+    # Fallback: deterministic pick.
+    return sorted(exam_dirs, key=lambda p: p.as_posix())[0], True
+
+
 def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFrame:
     """
     Match labels to local DICOM folders and pick one Series folder per exam.
@@ -39,19 +107,28 @@ def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFra
     """
     rows: list[dict] = []
 
+    exam_lookup = _build_exam_dir_lookup(dicom_root)
+
     for r in labels.itertuples(index=False):
-        exam_dir = dicom_root / r.date / str(r.exam_id)
-        if not exam_dir.is_dir():
+        exam_dirs = exam_lookup.get(int(r.exam_id))
+        if not exam_dirs:
             continue
+
+        exam_dir, ambiguous = _resolve_exam_dir(exam_dirs, label_date=getattr(r, "date", None))
 
         series_dir, n_instances = _pick_series_dir(exam_dir)
         if series_dir is None or n_instances <= 0:
             continue
 
+        folder_date = exam_dir.parent.name
+        label_date = getattr(r, "date", None)
         rows.append(
             {
                 "exam_id": int(r.exam_id),
-                "date": r.date,
+                "date": label_date,
+                "folder_date": folder_date,
+                "date_match": bool(label_date == folder_date) if label_date is not None else False,
+                "ambiguous_match": bool(ambiguous),
                 "exam_relpath": str(exam_dir.relative_to(dicom_root)),
                 "series_relpath": str(series_dir.relative_to(dicom_root)),
                 "n_instances": int(n_instances),

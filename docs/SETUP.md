@@ -18,6 +18,12 @@ conda activate medical_fenlei
 pip install -e .
 ```
 
+如果已经创建过环境，更新依赖：
+
+```bash
+conda env update -f environment.yml --prune
+```
+
 验证 GPU：
 
 ```bash

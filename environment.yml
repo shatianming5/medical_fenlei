@@ -20,6 +20,7 @@ dependencies:
   - pydicom
   - pip:
       - monai
+      - pylibjpeg
+      - pylibjpeg-libjpeg
       - rich
       - typer
-

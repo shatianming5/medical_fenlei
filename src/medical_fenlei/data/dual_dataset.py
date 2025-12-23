@@ -71,6 +71,7 @@ class EarCTDualDataset(Dataset):
         flip_right: bool = True,
         cache_dir: Path | None = None,
         cache_dtype: str = "float16",
+        return_image: bool = True,
     ) -> None:
         self.index = index_df.reset_index(drop=True)
         self.dicom_root = dicom_root
@@ -79,6 +80,7 @@ class EarCTDualDataset(Dataset):
         self.flip_right = bool(flip_right)
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.cache_dtype = str(cache_dtype)
+        self.return_image = bool(return_image)
 
         self._resize = Resize(
             spatial_size=(self.num_slices, self.image_size, self.image_size),
@@ -109,12 +111,14 @@ class EarCTDualDataset(Dataset):
         if self.cache_dir is not None:
             cache_path = self._cache_path(exam_id=exam_id, series_relpath=series_relpath)
             if cache_path.exists():
-                arr = np.load(cache_path)
-                image = torch.from_numpy(arr).to(torch.float32)
                 meta = {"exam_id": exam_id, "date": str(row["date"]), "series_relpath": series_relpath}
                 label = torch.tensor([left_label, right_label], dtype=torch.long)
                 label_mask = torch.tensor([left_present, right_present], dtype=torch.bool)
-                return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
+                if self.return_image:
+                    arr = np.load(cache_path)
+                    image = torch.from_numpy(arr).to(torch.float32)
+                    return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
+                return {"label": label, "label_mask": label_mask, "meta": meta}
 
         files = list_dicom_files(series_dir)
         indices = _evenly_spaced_indices(len(files), self.num_slices)
@@ -170,4 +174,6 @@ class EarCTDualDataset(Dataset):
                 except Exception:
                     pass
 
-        return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
+        if self.return_image:
+            return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
+        return {"label": label, "label_mask": label_mask, "meta": meta}

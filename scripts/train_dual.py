@@ -54,24 +54,29 @@ def _masked_ce_loss(
 def _masked_accuracy(logits: torch.Tensor, labels: torch.Tensor, label_mask: torch.Tensor) -> dict:
     pred = logits.argmax(dim=-1)  # (B,2)
     mask = label_mask.bool()
-    denom = int(mask.sum().item())
-    if denom <= 0:
-        return {"acc": 0.0, "left_acc": 0.0, "right_acc": 0.0, "n": 0}
+    total_n = int(mask.sum().item())
+    if total_n <= 0:
+        return {"acc": 0.0, "left_acc": 0.0, "right_acc": 0.0, "n": 0, "left_n": 0, "right_n": 0}
 
-    correct = ((pred == labels) & mask).sum().item()
+    total_correct = int(((pred == labels) & mask).sum().item())
+
     left_mask = mask[:, 0]
     right_mask = mask[:, 1]
+    left_n = int(left_mask.sum().item())
+    right_n = int(right_mask.sum().item())
+    left_correct = int(((pred[:, 0] == labels[:, 0]) & left_mask).sum().item())
+    right_correct = int(((pred[:, 1] == labels[:, 1]) & right_mask).sum().item())
 
-    def _side_acc(side: int, m: torch.Tensor) -> float:
-        if int(m.sum().item()) <= 0:
-            return 0.0
-        return float((((pred[:, side] == labels[:, side]) & m).float().mean().item()))
+    left_acc = float(left_correct / left_n) if left_n > 0 else 0.0
+    right_acc = float(right_correct / right_n) if right_n > 0 else 0.0
 
     return {
-        "acc": float(correct / denom),
-        "left_acc": _side_acc(0, left_mask),
-        "right_acc": _side_acc(1, right_mask),
-        "n": denom,
+        "acc": float(total_correct / total_n),
+        "left_acc": left_acc,
+        "right_acc": right_acc,
+        "n": total_n,
+        "left_n": left_n,
+        "right_n": right_n,
     }
 
 

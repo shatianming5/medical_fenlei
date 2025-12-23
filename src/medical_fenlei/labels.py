@@ -6,7 +6,7 @@ from typing import Final
 
 import pandas as pd
 
-_DIAG_RE: Final = re.compile(r"^\\s*(?P<code>\\d+)\\s*[：:]\\s*(?P<name>.+?)\\s*$")
+_DIAG_RE: Final = re.compile(r"^\s*(?P<code>\d+)\s*[：:]\s*(?P<name>.+?)\s*$")
 
 
 def _parse_diag(value) -> tuple[int | None, str | None]:
@@ -63,4 +63,3 @@ def load_labels_xlsx(
     out["exam_id"] = out["exam_id"].astype("int64")
     out = out.drop_duplicates(subset=["exam_id", "date"]).reset_index(drop=True)
     return out
-

@@ -17,3 +17,25 @@ IMPORTANT（每一轮都要执行）
 JOBS=30 THREADS=30 tools/extract_all.sh
 tail -f logs/extract_all.log
 ```
+
+## 训练/推理（本地）
+
+环境安装见 `docs/SETUP.md`。
+
+1) 生成索引（会匹配 `metadata/*.xlsx` 的检查号/检查时间到本地 DICOM 目录）：
+
+```bash
+python scripts/build_index.py --out-csv artifacts/dataset_index.csv
+```
+
+2) 训练（输出到 `outputs/`，默认不入库）：
+
+```bash
+python scripts/train.py --index-csv artifacts/dataset_index.csv
+```
+
+3) 推理（输出到 `artifacts/`，默认不入库）：
+
+```bash
+python scripts/predict.py --checkpoint outputs/<run>/checkpoints/best.pt --out-csv artifacts/predictions.csv
+```

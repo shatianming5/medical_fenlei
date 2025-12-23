@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_DATE_RE = re.compile(r"^\\d{4}-\\d{2}-\\d{2}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _is_date_dir(name: str) -> bool:
@@ -46,4 +46,3 @@ def infer_dicom_root(base: Path, *, max_descend: int = 5) -> Path:
         return current
 
     return current
-

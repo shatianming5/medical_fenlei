@@ -22,6 +22,7 @@ def main(
         Path("metadata/导出数据第1~4017条数据20240329-To模型训练团队.xlsx"),
         help="标注表 XLSX（本地文件，不入库）",
     ),
+    limit: int | None = typer.Option(None, help="仅处理前 N 条（用于快速验证）"),
     out_csv: Path = typer.Option(
         Path("artifacts/dataset_index.csv"),
         help="输出索引 CSV（不入库）",
@@ -29,6 +30,8 @@ def main(
 ) -> None:
     dicom_root = infer_dicom_root(dicom_base)
     labels = load_labels_xlsx(xlsx_path)
+    if limit is not None:
+        labels = labels.head(int(limit))
     index = build_dataset_index(labels, dicom_root=dicom_root)
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -42,4 +45,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

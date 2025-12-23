@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from monai.transforms import Resize
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 
 from medical_fenlei.constants import CLASS_ID_TO_NAME
@@ -82,12 +82,6 @@ class EarCTDualDataset(Dataset):
         self.cache_dtype = str(cache_dtype)
         self.return_image = bool(return_image)
 
-        self._resize = Resize(
-            spatial_size=(self.num_slices, self.image_size, self.image_size),
-            mode="trilinear",
-            align_corners=False,
-        )
-
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -95,7 +89,7 @@ class EarCTDualDataset(Dataset):
         return len(self.index)
 
     def _cache_path(self, *, exam_id: int, series_relpath: str) -> Path:
-        key = f"{series_relpath}|d={self.num_slices}|s={self.image_size}|flip={int(self.flip_right)}"
+        key = f"{series_relpath}|d={self.num_slices}|s={self.image_size}|flip={int(self.flip_right)}|v=2"
         h = hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
         return self.cache_dir / f"{exam_id}_{h}.npy"
 
@@ -125,22 +119,20 @@ class EarCTDualDataset(Dataset):
         if not indices:
             raise RuntimeError(f"no dicom files in: {series_dir}")
 
-        left_slices: list[np.ndarray] = []
-        right_slices: list[np.ndarray] = []
+        left_slices: list[torch.Tensor] = []
+        right_slices: list[torch.Tensor] = []
         for j in indices:
             img = read_dicom_image(files[j])
             left, right = _crop_left_right(img, flip_right=self.flip_right)
-            left_slices.append(left)
-            right_slices.append(right)
+            left_t = torch.from_numpy(left[None, None, ...])  # (1,1,H,W)
+            right_t = torch.from_numpy(right[None, None, ...])
+            left_t = F.interpolate(left_t, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
+            right_t = F.interpolate(right_t, size=(self.image_size, self.image_size), mode="bilinear", align_corners=False)
+            left_slices.append(left_t[0])  # (1,H,W)
+            right_slices.append(right_t[0])
 
-        left_vol = np.stack(left_slices, axis=0).astype(np.float32)  # (D, H, W/2)
-        right_vol = np.stack(right_slices, axis=0).astype(np.float32)
-
-        left_t = torch.from_numpy(left_vol)[None, ...]  # (1, D, H, W)
-        right_t = torch.from_numpy(right_vol)[None, ...]
-
-        left_t = self._resize(left_t)
-        right_t = self._resize(right_t)
+        left_t = torch.stack(left_slices, dim=0).permute(1, 0, 2, 3).contiguous()  # (1,D,H,W)
+        right_t = torch.stack(right_slices, dim=0).permute(1, 0, 2, 3).contiguous()
 
         image = torch.stack([left_t, right_t], dim=0)  # (2, 1, D, H, W)
 

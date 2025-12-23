@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from contextlib import nullcontext
+import gc
 from pathlib import Path
 import re
 
@@ -159,6 +160,11 @@ def _autotune_batch_size(
         else:
             right = mid
     return int(left)
+
+
+def _is_cuda_oom(e: BaseException) -> bool:
+    msg = str(e).lower()
+    return "out of memory" in msg or ("cuda" in msg and "oom" in msg)
 
 
 def _run_epoch(
@@ -460,31 +466,85 @@ def main(
     best_score = float("inf") if metric_mode == "min" else float("-inf")
     bad_epochs = 0
 
-    for epoch in range(1, epochs + 1):
-        train_m = _run_epoch(
-            model=net,
-            loader=train_loader,
-            device=device,
-            loss_fn=loss_fn,
-            optimizer=optimizer,
-            scaler=scaler,
-            amp=amp,
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    def _rebuild_loaders(bs: int) -> None:
+        nonlocal train_loader, val_loader
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=int(bs),
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
         )
+        val_loader = DataLoader(
+            val_ds,
+            batch_size=int(bs),
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            persistent_workers=num_workers > 0,
+        )
+
+    for epoch in range(1, epochs + 1):
+        oom_retries = 0
+        while True:
+            try:
+                train_m = _run_epoch(
+                    model=net,
+                    loader=train_loader,
+                    device=device,
+                    loss_fn=loss_fn,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    amp=amp,
+                )
+                break
+            except RuntimeError as e:
+                if device.type == "cuda" and _is_cuda_oom(e) and int(batch_size) > 1 and oom_retries < 16:
+                    oom_retries += 1
+                    old_bs = int(batch_size)
+                    batch_size = old_bs - 1
+                    typer.echo(f"OOM(train): epoch={epoch} batch_size {old_bs} -> {int(batch_size)} (retry {oom_retries}/16)")
+                    optimizer.zero_grad(set_to_none=True)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    _rebuild_loaders(int(batch_size))
+                    continue
+                raise
 
         if empty_cache and device.type == "cuda":
             torch.cuda.empty_cache()
 
-        val_m = _run_epoch(
-            model=net,
-            loader=val_loader,
-            device=device,
-            loss_fn=loss_fn,
-            optimizer=None,
-            scaler=None,
-            amp=amp,
-            num_classes=num_classes,
-            collect_cm=True,
-        )
+        oom_retries = 0
+        while True:
+            try:
+                val_m = _run_epoch(
+                    model=net,
+                    loader=val_loader,
+                    device=device,
+                    loss_fn=loss_fn,
+                    optimizer=None,
+                    scaler=None,
+                    amp=amp,
+                    num_classes=num_classes,
+                    collect_cm=True,
+                )
+                break
+            except RuntimeError as e:
+                if device.type == "cuda" and _is_cuda_oom(e) and int(batch_size) > 1 and oom_retries < 16:
+                    oom_retries += 1
+                    old_bs = int(batch_size)
+                    batch_size = old_bs - 1
+                    typer.echo(f"OOM(val): epoch={epoch} batch_size {old_bs} -> {int(batch_size)} (retry {oom_retries}/16)")
+                    optimizer.zero_grad(set_to_none=True)
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    _rebuild_loaders(int(batch_size))
+                    continue
+                raise
 
         cm = val_m.pop("confusion_matrix")
         report = classification_report_from_confusion(cm, class_id_to_name=CLASS_ID_TO_NAME)

@@ -90,48 +90,6 @@ def _parse_int_tuple(value: str, *, n: int | None = None) -> tuple[int, ...]:
     return out
 
 
-@torch.no_grad()
-def _confusion_matrix(
-    *,
-    model: torch.nn.Module,
-    loader: DataLoader,
-    device: torch.device,
-    num_classes: int,
-    amp: bool,
-) -> torch.Tensor:
-    model.eval()
-    cm = torch.zeros((num_classes, num_classes), dtype=torch.int64)
-
-    for batch in loader:
-        x = batch["image"].to(device, non_blocking=True)
-        y = batch["label"]  # keep on cpu
-        m = batch["label_mask"].bool()  # cpu
-
-        amp_enabled = amp and device.type == "cuda"
-        if amp_enabled:
-            if hasattr(torch, "amp"):
-                autocast_ctx = torch.amp.autocast(device_type="cuda")
-            else:
-                autocast_ctx = torch.cuda.amp.autocast()
-        else:
-            autocast_ctx = nullcontext()
-
-        with autocast_ctx:
-            logits = model(x)  # (B,2,C)
-        pred = logits.argmax(dim=-1).detach().cpu()  # (B,2)
-
-        y_flat = y[m].view(-1).to(torch.int64)
-        p_flat = pred[m].view(-1).to(torch.int64)
-        if y_flat.numel() == 0:
-            continue
-
-        idx = y_flat * int(num_classes) + p_flat
-        binc = torch.bincount(idx, minlength=int(num_classes) * int(num_classes))
-        cm += binc.view(int(num_classes), int(num_classes))
-
-    return cm
-
-
 def _autotune_batch_size(
     *,
     model: torch.nn.Module,
@@ -205,6 +163,8 @@ def _run_epoch(
     optimizer: torch.optim.Optimizer | None,
     scaler: torch.cuda.amp.GradScaler | None,
     amp: bool,
+    num_classes: int | None = None,
+    collect_cm: bool = False,
 ) -> dict:
     is_train = optimizer is not None
     model.train(is_train)
@@ -217,6 +177,12 @@ def _run_epoch(
     total_left_n = 0
     total_right_n = 0
     n_batches = 0
+
+    cm = None
+    if collect_cm:
+        if num_classes is None:
+            raise ValueError("num_classes is required when collect_cm=True")
+        cm = torch.zeros((int(num_classes), int(num_classes)), dtype=torch.int64)
 
     for batch in loader:
         x = batch["image"].to(device, non_blocking=True)
@@ -259,16 +225,33 @@ def _run_epoch(
         total_right_n += right_n
         n_batches += 1
 
-    if total_n <= 0:
-        return {"loss": total_loss / max(n_batches, 1), "acc": 0.0, "left_acc": 0.0, "right_acc": 0.0, "n": 0}
+        if cm is not None:
+            pred = logits.detach().argmax(dim=-1).cpu()
+            y_cpu = y.detach().cpu()
+            m_cpu = m.detach().cpu().bool()
+            y_flat = y_cpu[m_cpu].view(-1).to(torch.int64)
+            p_flat = pred[m_cpu].view(-1).to(torch.int64)
+            if y_flat.numel() > 0:
+                idx = y_flat * int(num_classes) + p_flat
+                binc = torch.bincount(idx, minlength=int(num_classes) * int(num_classes))
+                cm += binc.view(int(num_classes), int(num_classes))
 
-    return {
+    if total_n <= 0:
+        out = {"loss": total_loss / max(n_batches, 1), "acc": 0.0, "left_acc": 0.0, "right_acc": 0.0, "n": 0}
+        if cm is not None:
+            out["confusion_matrix"] = cm
+        return out
+
+    out = {
         "loss": total_loss / max(n_batches, 1),
         "acc": total_acc / total_n,
         "left_acc": (total_left / max(total_left_n, 1)) if total_left_n > 0 else 0.0,
         "right_acc": (total_right / max(total_right_n, 1)) if total_right_n > 0 else 0.0,
         "n": total_n,
     }
+    if cm is not None:
+        out["confusion_matrix"] = cm
+    return out
 
 
 def _resolve_split_paths(splits_root: Path, pct: int) -> tuple[Path, Path]:
@@ -299,6 +282,9 @@ def main(
     num_workers: int = typer.Option(8),
     num_slices: int = typer.Option(32),
     image_size: int = typer.Option(224),
+    cache: bool = typer.Option(True, "--cache/--no-cache", help="缓存预处理后的体数据到 cache/，提高吞吐并榨干 GPU"),
+    cache_dir: Path = typer.Option(Path("cache/dual_volumes"), help="缓存目录（不入库）"),
+    cache_dtype: str = typer.Option("float16", help="缓存数据类型：float16 | float32"),
     vit_patch_size: str = typer.Option("4,16,16", help="仅 dual_vit_3d 生效，例如 4,16,16"),
     vit_hidden_size: int = typer.Option(768),
     vit_mlp_dim: int = typer.Option(3072),
@@ -333,12 +319,18 @@ def main(
         if hasattr(torch, "set_float32_matmul_precision"):
             torch.set_float32_matmul_precision("high")
 
+    used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}"
+    if not cache:
+        used_cache_dir = None
+
     train_ds = EarCTDualDataset(
         index_df=train_df,
         dicom_root=dicom_root,
         num_slices=num_slices,
         image_size=image_size,
         flip_right=True,
+        cache_dir=used_cache_dir,
+        cache_dtype=cache_dtype,
     )
     val_ds = EarCTDualDataset(
         index_df=val_df,
@@ -346,6 +338,8 @@ def main(
         num_slices=num_slices,
         image_size=image_size,
         flip_right=True,
+        cache_dir=used_cache_dir,
+        cache_dtype=cache_dtype,
     )
 
     train_loader = DataLoader(
@@ -440,6 +434,8 @@ def main(
     typer.echo(f"task: 一次检查 -> 左/右双输出 6 分类  classes={num_classes}")
     typer.echo(f"model: {model}  pct={pct}%  batch_size={batch_size}  amp={amp}")
     typer.echo(f"dicom_root: {dicom_root}")
+    if used_cache_dir is not None:
+        typer.echo(f"cache_dir: {used_cache_dir} ({cache_dtype})")
     typer.echo(f"train_exams: {len(train_ds)}  val_exams: {len(val_ds)}")
     typer.echo(f"output: {out}")
 
@@ -462,9 +458,11 @@ def main(
             optimizer=None,
             scaler=None,
             amp=amp,
+            num_classes=num_classes,
+            collect_cm=True,
         )
 
-        cm = _confusion_matrix(model=net, loader=val_loader, device=device, num_classes=num_classes, amp=amp)
+        cm = val_m.pop("confusion_matrix")
         report = classification_report_from_confusion(cm, class_id_to_name=CLASS_ID_TO_NAME)
         report_path = report_dir / f"epoch_{epoch}.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

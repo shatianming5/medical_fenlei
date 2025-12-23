@@ -84,3 +84,9 @@ python scripts/run_experiments_dual.py
 ```
 
 默认 max epochs（可改）：1%/20%/100% 分别是 200/80/40；并默认开启 early stopping（见 `scripts/run_experiments_dual.py` 和 `scripts/train_dual.py`）。
+
+4) 跑完后汇总对比（生成 CSV + Markdown 排行）：
+
+```bash
+python scripts/summarize_experiments_dual.py --metric macro_f1
+```

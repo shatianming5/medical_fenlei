@@ -35,6 +35,9 @@ def main(
     num_workers: int = typer.Option(4),
     num_slices: int | None = typer.Option(None, help="默认从 checkpoint 读取"),
     image_size: int | None = typer.Option(None, help="默认从 checkpoint 读取"),
+    cache: bool = typer.Option(True, "--cache/--no-cache", help="使用 cache/ 缓存体数据，提高吞吐"),
+    cache_dir: Path = typer.Option(Path("cache/dual_volumes"), help="缓存目录（不入库）"),
+    cache_dtype: str = typer.Option("float16", help="缓存数据类型：float16 | float32"),
 ) -> None:
     df = pd.read_csv(index_csv)
     if df.empty:
@@ -51,7 +54,19 @@ def main(
     if image_size is None:
         image_size = int(ckpt.get("image_size", 224))
 
-    ds = EarCTDualDataset(index_df=df, dicom_root=dicom_root, num_slices=int(num_slices), image_size=int(image_size), flip_right=True)
+    used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}"
+    if not cache:
+        used_cache_dir = None
+
+    ds = EarCTDualDataset(
+        index_df=df,
+        dicom_root=dicom_root,
+        num_slices=int(num_slices),
+        image_size=int(image_size),
+        flip_right=True,
+        cache_dir=used_cache_dir,
+        cache_dtype=cache_dtype,
+    )
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

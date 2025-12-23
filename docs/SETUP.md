@@ -15,6 +15,7 @@ source "$HOME/miniconda3/etc/profile.d/conda.sh"
 ```bash
 conda env create -f environment.yml
 conda activate medical_fenlei
+pip install -e .
 ```
 
 验证 GPU：
@@ -27,4 +28,3 @@ print("cuda available:", torch.cuda.is_available())
 print("device:", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
 PY
 ```
-

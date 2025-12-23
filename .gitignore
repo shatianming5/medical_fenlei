@@ -18,6 +18,12 @@ wandb/**
 mlruns/**
 lightning_logs/**
 tensorboard/**
+artifacts/**
+cache/**
+
+# Keep directory docs (no artifacts)
+!artifacts/README.md
+!cache/README.md
 
 *.ckpt
 *.pth
@@ -43,4 +49,3 @@ __pycache__/
 venv/
 .venv/
 miniconda3/
-

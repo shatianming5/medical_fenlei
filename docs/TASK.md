@@ -22,12 +22,14 @@
 如果直接做 6 分类效果不佳，可以拆成多组二分类任务（仍然是“一次检查 -> 左/右双输出”）：
 
 - `normal_vs_diseased`：正常(5) vs 患病(1..4)（默认不含“其他(6)”）
+- `normal_vs_abnormal`：正常(5) vs 非正常(1,2,3,4,6)（推荐：表征学习主任务）
 - `normal_vs_csoma`：正常(5) vs 慢性化脓性中耳炎(1)
 - `normal_vs_cholesteatoma`：正常(5) vs 中耳胆脂瘤(2)
 - `normal_vs_cholesterol_granuloma`：正常(5) vs 胆固醇肉芽肿(4)
 - `normal_vs_ome`：正常(5) vs 分泌性中耳炎(3)
 - `ome_vs_cholesterol_granuloma`：分泌性中耳炎(3) vs 胆固醇肉芽肿(4)
 - `cholesteatoma_vs_csoma`：中耳胆脂瘤(2) vs 慢性化脓性中耳炎(1)
+- `cholesteatoma_vs_other_abnormal`：胆脂瘤(2) vs 其他异常(1,3,4,6)（不含正常）
 
 说明：
 - 二分类标签固定为：`0=neg(任务名左侧)`，`1=pos(任务名右侧/患病)`
@@ -39,6 +41,71 @@
 ```bash
 python scripts/train_dual.py --pct 20 --model dual_resnet50_3d --label-task normal_vs_csoma --auto-batch
 python scripts/run_experiments_dual.py --label-task normal_vs_csoma
+```
+
+## 推荐主路线：耳朵级 2D + Attention（更稳/更省显存/可解释）
+
+`check.md` 推荐把“耳朵”作为样本单位，并优先用 2D slice encoder + attention pooling 作为主干：
+
+- 模型：`scripts/train_ear2d.py`（ResNet18/34/50 2D 编码器 + z attention 聚合）
+- 输入：每耳 `K=32` 张 slice（缓存为 HU），训练时做 WL/WW jitter + 轻量增强
+- 训练：balanced sampler + BCE(pos_weight) + cosine(warmup) + grad clip
+- 评估：AUROC/AUPRC + sensitivity/specificity + sensitivity@95%spec + bootstrap CI（按 exam_id）
+- 解释：attention top-k 切片 + `scripts/gradcam_ear2d.py` 生成 CAM/overlay
+
+建议流程（本地，不入库）：
+
+1) 先生成 manifest（含 patient_key_hash，用于泄漏检查与 patient split）：
+
+```bash
+python scripts/build_manifest_ears.py --index-csv artifacts/dataset_index.csv --out-csv artifacts/manifest_ears.csv
+python scripts/check_patient_leakage.py --manifest-csv artifacts/manifest_ears.csv
+```
+
+2) 生成 patient-level split（推荐单独目录）：
+
+```bash
+python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual_patient --manifest-csv artifacts/manifest_ears.csv --patient-split
+```
+
+3) 构建耳朵级 HU cache（否则训练/评估会频繁解码 DICOM）：
+
+```bash
+python scripts/build_cache_ears.py --splits-root artifacts/splits_dual_patient --pct 100 --num-slices 32 --image-size 224 --crop-size 192 --sampling even --num-workers 16
+```
+
+4) 训练（推荐从 `normal_vs_abnormal` 开始）：
+
+```bash
+python scripts/train_ear2d.py --splits-root artifacts/splits_dual_patient --pct 20 --label-task normal_vs_abnormal --backbone resnet18
+```
+
+5) 多 seed + CI：
+
+```bash
+python scripts/run_seeds_ear2d.py --splits-root artifacts/splits_dual_patient --pct 20 --label-task normal_vs_abnormal --seeds 0,1,2
+```
+
+6) 评估与解释：
+
+```bash
+python scripts/eval_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --splits-root artifacts/splits_dual_patient --pct 20
+python scripts/gradcam_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --exam-id <id> --side left
+```
+
+## code4（胆固醇肉芽肿）few-shot（推荐单独报告）
+
+由于 code4 极端稀有（训练正例 28、验证正例 8），更合理的做法是：
+
+1) 先用 `normal_vs_abnormal` 训练一个 embedding 网络
+2) 用 embedding 做 prototype / kNN / 强正则线性模型，并强制报告 bootstrap CI
+
+本仓库提供：
+
+```bash
+python scripts/extract_embeddings_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --split train --pct 100 --out-npz artifacts/emb_train.npz
+python scripts/extract_embeddings_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --split val   --pct 100 --out-npz artifacts/emb_val.npz
+python scripts/fewshot_code4.py --train-npz artifacts/emb_train.npz --val-npz artifacts/emb_val.npz --task normal_vs_cholesterol_granuloma
 ```
 
 ## 为什么要做 1% / 20% / 100% 三层？

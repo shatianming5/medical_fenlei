@@ -22,6 +22,62 @@ tail -f logs/extract_all.log
 
 环境安装见 `docs/SETUP.md`。
 
+### 推荐主路线（对照 `check.md`）：耳朵级 2D + Attention（二分类优先）
+
+`check.md` 里建议把“耳朵”作为样本单位，并优先用 2D slice encoder + z 聚合（attention）来获得更稳、更省显存、可解释的结果；本仓库已补齐对应脚本：
+
+1) 生成耳朵级 manifest（含 DICOM header 元数据、task mask；不入库）：
+
+```bash
+python scripts/build_manifest_ears.py --index-csv artifacts/dataset_index.csv --out-csv artifacts/manifest_ears.csv
+```
+
+2) 病人级泄漏检查（如果 DICOM 里有 PatientID/Name，会生成 hash 并检查；不入库）：
+
+```bash
+python scripts/check_patient_leakage.py --manifest-csv artifacts/manifest_ears.csv
+```
+
+3) 生成 **patient-level split**（避免同一病人跨 train/val；推荐输出到新目录）：
+
+```bash
+python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual_patient --manifest-csv artifacts/manifest_ears.csv --patient-split
+```
+
+4) 先构建耳朵级 HU cache（可选但强烈建议，否则会反复解码 DICOM 让 GPU 空转）：
+
+```bash
+python scripts/build_cache_ears.py --splits-root artifacts/splits_dual_patient --pct 100 --num-slices 32 --image-size 224 --crop-size 192 --sampling even --num-workers 16
+```
+
+5) 训练（二分类）：推荐从 `normal_vs_abnormal`（正常 vs 非正常(1,2,3,4,6)）开始作为表征学习主任务：
+
+```bash
+python scripts/train_ear2d.py --splits-root artifacts/splits_dual_patient --pct 20 --label-task normal_vs_abnormal --backbone resnet18
+```
+
+6) 多 seed 稳定性 + bootstrap CI（会依次训练并评估，输出到 `outputs/ear2d_seeds/`）：
+
+```bash
+python scripts/run_seeds_ear2d.py --splits-root artifacts/splits_dual_patient --pct 20 --label-task normal_vs_abnormal --seeds 0,1,2
+```
+
+7) 解释性：
+- attention top-k 切片：`scripts/eval_ear2d.py` 会把 top slices 写入 `reports/predictions_val.csv`
+- Grad-CAM：对指定样本输出 slice-level CAM/overlay
+
+```bash
+python scripts/gradcam_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --exam-id <id> --side left
+```
+
+8) code4（胆固醇肉芽肿）few-shot：先用主任务训练一个 embedding 网络，再做 prototype/kNN（强制 CI）
+
+```bash
+python scripts/extract_embeddings_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --split train --pct 100 --out-npz artifacts/emb_train.npz
+python scripts/extract_embeddings_ear2d.py --checkpoint outputs/<run>/checkpoints/best.pt --split val   --pct 100 --out-npz artifacts/emb_val.npz
+python scripts/fewshot_code4.py --train-npz artifacts/emb_train.npz --val-npz artifacts/emb_val.npz --task normal_vs_cholesterol_granuloma
+```
+
 1) 生成索引（仅按检查号 `exam_id` 匹配到本地 DICOM 目录；检查时间在该数据中大量不一致，仅作为 `label_date` 保留）：
 
 ```bash

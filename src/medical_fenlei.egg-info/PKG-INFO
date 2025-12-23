@@ -1,5 +1,0 @@
-Metadata-Version: 2.4
-Name: medical-fenlei
-Version: 0.1.0
-Summary: DICOM medical imaging diagnosis classification
-Requires-Python: >=3.10

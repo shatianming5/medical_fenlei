@@ -31,21 +31,21 @@ python scripts/build_index.py --out-csv artifacts/dataset_index.csv
 2) 生成 1% / 20% / 100% 三层训练集（按类别分层等比例抽样，输出到 `artifacts/splits/`，不入库）：
 
 ```bash
-python scripts/make_splits.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits --ratios 0.01,0.2,1.0
+python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual --ratios 0.01,0.2,1.0
 ```
 
-3) 单耳(左/右) 6 分类训练（输出到 `outputs/`，不入库）：
+3) 一次检查 -> 左/右双输出 6 分类训练（MONAI 3D ResNet10；输出到 `outputs/`，不入库）：
 
 ```bash
-python scripts/train_side.py --pct 1   --model slice_mean_resnet18
-python scripts/train_side.py --pct 20  --model slice_mean_resnet18
-python scripts/train_side.py --pct 100 --model resnet10_3d
+python scripts/train_dual.py --pct 1
+python scripts/train_dual.py --pct 20
+python scripts/train_dual.py --pct 100
 ```
 
 4) 推理（输出到 `artifacts/`，不入库）：
 
 ```bash
-python scripts/predict_side.py --checkpoint outputs/<run>/checkpoints/best.pt --index-csv artifacts/splits/100pct/val.csv --out-csv artifacts/predictions_side.csv
+python scripts/predict_dual.py --checkpoint outputs/<run>/checkpoints/best.pt --index-csv artifacts/splits_dual/100pct/val.csv --out-csv artifacts/predictions_dual.csv
 ```
 
 更多说明见 `docs/TASK.md`。

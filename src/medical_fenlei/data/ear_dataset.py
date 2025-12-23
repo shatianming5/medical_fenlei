@@ -235,7 +235,7 @@ class EarCTHUEarDataset(Dataset):
 
     Expected columns in index_df:
       - exam_id, series_relpath, side
-      - y (binary 0/1 float or int)
+      - y (binary 0/1 or multi-class id)
     """
 
     def __init__(
@@ -246,12 +246,14 @@ class EarCTHUEarDataset(Dataset):
         spec: EarPreprocessSpec,
         cache_dir: Path | None = None,
         return_meta: bool = True,
+        y_dtype: torch.dtype = torch.float32,
     ) -> None:
         self.index = index_df.reset_index(drop=True)
         self.dicom_root = Path(dicom_root)
         self.spec = spec
         self.cache_dir = Path(cache_dir) if cache_dir is not None else None
         self.return_meta = bool(return_meta)
+        self.y_dtype = y_dtype
 
         if self.cache_dir is not None:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -268,7 +270,10 @@ class EarCTHUEarDataset(Dataset):
         exam_id = int(row["exam_id"])
         side = str(row["side"])
         series_relpath = str(row["series_relpath"])
-        y = float(row["y"])
+        if self.y_dtype in (torch.int8, torch.int16, torch.int32, torch.int64, torch.long, torch.uint8):
+            y = int(row["y"])
+        else:
+            y = float(row["y"])
         try:
             label_code = int(row.get("label_code", -1))
         except Exception:
@@ -289,7 +294,7 @@ class EarCTHUEarDataset(Dataset):
             if cache_path.exists():
                 arr = np.load(cache_path)  # (K,H,W) float16 HU
                 hu = torch.from_numpy(arr.astype(np.float32))
-                out = {"hu": hu, "y": torch.tensor(y, dtype=torch.float32)}
+                out = {"hu": hu, "y": torch.tensor(y, dtype=self.y_dtype)}
                 if self.return_meta:
                     meta_path = cache_path.with_suffix(".json")
                     if meta_path.exists():
@@ -321,7 +326,7 @@ class EarCTHUEarDataset(Dataset):
                     pass
 
         hu = torch.from_numpy(arr.astype(np.float32))
-        out = {"hu": hu, "y": torch.tensor(y, dtype=torch.float32)}
+        out = {"hu": hu, "y": torch.tensor(y, dtype=self.y_dtype)}
         if self.return_meta:
             meta.update(meta2)
             out["meta"] = meta

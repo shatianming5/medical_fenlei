@@ -242,13 +242,15 @@ def _write_markdown(rows: list[RunSummary], path: Path, *, metric: str, topk: in
         by_pct.setdefault(int(r.pct), []).append(r)
 
     def sort_key(r: RunSummary) -> tuple[int, float]:
+        is_ok = 1 if r.status == "ok" else 0
         v = r.best_metric
         if v is None:
-            v = float("-inf") if metric != "val_loss" else float("inf")
-        score = float(v)
-        if metric == "val_loss":
-            score = -score
-        return (0 if r.status == "ok" else 1), float(score)
+            score = float("-inf")
+        else:
+            score = float(v)
+            if metric == "val_loss":
+                score = -score  # smaller val_loss is better
+        return is_ok, score
 
     lines: list[str] = []
     lines.append("# Dual Experiments Summary\n")
@@ -326,4 +328,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

@@ -149,6 +149,73 @@ def _bce_loss(
     return torch.nn.functional.binary_cross_entropy_with_logits(logits.view(-1), y)
 
 
+def _focal_loss_vec(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    gamma: float,
+    alpha: float | None,
+    pos_weight: float | None,
+    label_smoothing: float,
+) -> torch.Tensor:
+    y = y.view(-1).to(logits.dtype)
+    if float(label_smoothing) > 0:
+        eps = float(label_smoothing)
+        y = y * (1.0 - eps) + 0.5 * eps
+
+    pw = torch.tensor(float(pos_weight), device=logits.device, dtype=logits.dtype) if pos_weight is not None else None
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(logits.view(-1), y, reduction="none", pos_weight=pw)
+
+    p = torch.sigmoid(logits.view(-1))
+    p_t = p * y + (1.0 - p) * (1.0 - y)
+    mod = (1.0 - p_t).clamp(min=0.0).pow(float(gamma))
+    loss = mod * bce
+
+    if alpha is not None:
+        a = float(alpha)
+        alpha_t = (a * y + (1.0 - a) * (1.0 - y)).to(loss.dtype)
+        loss = alpha_t * loss
+
+    return loss
+
+
+def _bce_loss_vec(
+    logits: torch.Tensor,
+    y: torch.Tensor,
+    *,
+    pos_weight: float | None,
+    label_smoothing: float,
+) -> torch.Tensor:
+    y = y.view(-1).to(logits.dtype)
+    if float(label_smoothing) > 0:
+        eps = float(label_smoothing)
+        y = y * (1.0 - eps) + 0.5 * eps
+    pw = torch.tensor(float(pos_weight), device=logits.device, dtype=logits.dtype) if pos_weight is not None else None
+    return torch.nn.functional.binary_cross_entropy_with_logits(logits.view(-1), y, reduction="none", pos_weight=pw)
+
+
+def _robust_drop_high_loss_mean(loss_vec: torch.Tensor, y_hard: torch.Tensor, *, drop_frac: float) -> torch.Tensor:
+    drop_frac = float(drop_frac)
+    if drop_frac <= 0:
+        return loss_vec.mean()
+
+    y_hard = y_hard.view(-1).to(dtype=torch.long)
+    loss_vec = loss_vec.view(-1)
+    kept: list[torch.Tensor] = []
+    for cls in (0, 1):
+        m = y_hard == int(cls)
+        n = int(m.sum().item())
+        if n <= 0:
+            continue
+        keep = max(1, int(math.ceil((1.0 - drop_frac) * n)))
+        subset = loss_vec[m]
+        idx = torch.topk(subset.detach(), k=int(keep), largest=False).indices
+        kept.append(subset.gather(0, idx))
+    if not kept:
+        return loss_vec.mean()
+    return torch.cat(kept, dim=0).mean()
+
+
 @torch.no_grad()
 def _eval_epoch(
     *,
@@ -159,6 +226,9 @@ def _eval_epoch(
     ww: float,
     amp: bool,
     specificity_target: float,
+    loss_name: str,
+    focal_gamma: float,
+    focal_alpha: float | None,
 ) -> dict[str, Any]:
     model.eval()
     ys: list[float] = []
@@ -184,7 +254,18 @@ def _eval_epoch(
 
             with autocast_ctx:
                 logits = model(x)  # (B,1)
-                loss = _bce_loss(logits, y, pos_weight=None, label_smoothing=0.0)
+                if loss_name == "focal":
+                    lv = _focal_loss_vec(
+                        logits,
+                        y,
+                        gamma=float(focal_gamma),
+                        alpha=float(focal_alpha) if focal_alpha is not None else None,
+                        pos_weight=None,
+                        label_smoothing=0.0,
+                    )
+                    loss = lv.mean()
+                else:
+                    loss = _bce_loss(logits, y, pos_weight=None, label_smoothing=0.0)
 
             prob = torch.sigmoid(logits).detach().float().view(-1).cpu().numpy()
             ys.extend(y.detach().float().view(-1).cpu().numpy().tolist())
@@ -244,6 +325,11 @@ def main(
     wl_jitter: float = typer.Option(200.0),
     ww_scale_low: float = typer.Option(0.8),
     ww_scale_high: float = typer.Option(1.2),
+    loss: str = typer.Option("bce", help="loss：bce | focal"),
+    focal_gamma: float = typer.Option(2.0),
+    focal_alpha: float | None = typer.Option(None, help="focal alpha（None 表示不启用 alpha 平衡项）"),
+    drop_high_loss_frac: float = typer.Option(0.0, help="robust：每个 batch 内按类丢弃 top-loss 比例（0 表示禁用）"),
+    drop_high_loss_warmup_epochs: int = typer.Option(0, help="robust：在前 N 个 epoch 线性 warmup 到 drop_high_loss_frac"),
     early_stop_patience: int = typer.Option(10),
     early_stop_metric: str = typer.Option("auprc", help="auprc | auroc | sensitivity_at_spec | f1 | loss"),
     early_stop_min_delta: float = typer.Option(0.0),
@@ -253,6 +339,13 @@ def main(
     val_limit: int | None = typer.Option(None, help="仅使用前 N 个验证耳朵样本（用于 smoke）"),
     seed: int = typer.Option(42),
 ) -> None:
+    loss_name = str(loss).strip().lower()
+    if loss_name not in ("bce", "focal"):
+        raise ValueError("loss must be one of: bce, focal")
+
+    if drop_high_loss_frac < 0 or drop_high_loss_frac >= 1:
+        raise ValueError("drop_high_loss_frac must be in [0, 1)")
+
     train_csv = splits_root / f"{pct}pct" / "train.csv"
     val_csv = splits_root / f"{pct}pct" / "val.csv"
     if not train_csv.exists():
@@ -416,6 +509,11 @@ def main(
             "aug_intensity_prob": float(aug_intensity_prob),
             "aug_noise_prob": float(aug_noise_prob),
             "aug_gamma_prob": float(aug_gamma_prob),
+            "loss": str(loss_name),
+            "focal_gamma": float(focal_gamma),
+            "focal_alpha": float(focal_alpha) if focal_alpha is not None else None,
+            "drop_high_loss_frac": float(drop_high_loss_frac),
+            "drop_high_loss_warmup_epochs": int(drop_high_loss_warmup_epochs),
             "early_stop": {
                 "metric": str(early_stop_metric),
                 "patience": int(early_stop_patience),
@@ -470,6 +568,7 @@ def main(
         for it, batch in enumerate(train_loader):
             hu = batch["hu"].to(device, non_blocking=True)  # (B,K,H,W)
             y = batch["y"].to(device, non_blocking=True).view(-1, 1)
+            y_hard = (y.view(-1) >= 0.5).to(dtype=torch.long)
 
             # WL/WW jitter
             if augment:
@@ -500,7 +599,24 @@ def main(
 
             with autocast_ctx:
                 logits = model(x)  # (B,1)
-                loss = _bce_loss(logits, y, pos_weight=pos_weight, label_smoothing=float(label_smoothing)) / float(max(1, int(grad_accum)))
+                if loss_name == "focal":
+                    loss_vec = _focal_loss_vec(
+                        logits,
+                        y,
+                        gamma=float(focal_gamma),
+                        alpha=float(focal_alpha) if focal_alpha is not None else None,
+                        pos_weight=pos_weight,
+                        label_smoothing=float(label_smoothing),
+                    )
+                else:
+                    loss_vec = _bce_loss_vec(logits, y, pos_weight=pos_weight, label_smoothing=float(label_smoothing))
+
+                drop_frac_now = float(drop_high_loss_frac)
+                if int(drop_high_loss_warmup_epochs) > 0:
+                    t = float(max(0, int(epoch) - 1)) / float(max(1, int(drop_high_loss_warmup_epochs)))
+                    drop_frac_now = float(drop_frac_now) * float(min(1.0, t))
+
+                loss = _robust_drop_high_loss_mean(loss_vec, y_hard, drop_frac=drop_frac_now) / float(max(1, int(grad_accum)))
 
             if scaler is not None:
                 scaler.scale(loss).backward()
@@ -541,6 +657,9 @@ def main(
             ww=float(base_ww),
             amp=bool(amp),
             specificity_target=float(specificity_target),
+            loss_name=str(loss_name),
+            focal_gamma=float(focal_gamma),
+            focal_alpha=float(focal_alpha) if focal_alpha is not None else None,
         )
 
         rec = {"epoch": int(epoch), "train": train_m, "val": val_m}

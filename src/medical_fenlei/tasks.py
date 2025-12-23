@@ -52,6 +52,15 @@ TASKS: dict[str, TaskSpec] = {
         neg_codes=(5,),
         pos_codes=(1, 2, 3, 4),
     ),
+    # 2b) 正常 vs 非正常（包含“其他(6)”）：推荐作为表征学习主任务
+    "normal_vs_abnormal": TaskSpec(
+        name="normal_vs_abnormal",
+        kind="binary",
+        num_classes=2,
+        class_id_to_name={0: "正常", 1: "异常"},
+        neg_codes=(5,),
+        pos_codes=(1, 2, 3, 4, 6),
+    ),
     # 3) 正常 vs 慢性化脓性中耳炎(1)
     "normal_vs_csoma": TaskSpec(
         name="normal_vs_csoma",
@@ -106,6 +115,15 @@ TASKS: dict[str, TaskSpec] = {
         neg_codes=(2,),
         pos_codes=(1,),
     ),
+    # 胆脂瘤(2) vs 其他异常(1,3,4,6)：更贴近鉴别诊断（不含正常）
+    "cholesteatoma_vs_other_abnormal": TaskSpec(
+        name="cholesteatoma_vs_other_abnormal",
+        kind="binary",
+        num_classes=2,
+        class_id_to_name={0: "其他异常", 1: CLASS_ID_TO_NAME[1]},
+        neg_codes=(1, 3, 4, 6),
+        pos_codes=(2,),
+    ),
 }
 
 
@@ -115,12 +133,15 @@ ALIASES: dict[str, str] = {
     "multiclass": "six_class",
     "二分类_正常_vs_患病": "normal_vs_diseased",
     "正常vs患病": "normal_vs_diseased",
+    "正常vs非正常": "normal_vs_abnormal",
+    "正常vs异常": "normal_vs_abnormal",
     "正常vs慢性化脓性中耳炎": "normal_vs_csoma",
     "正常vs中耳胆脂瘤": "normal_vs_cholesteatoma",
     "正常vs胆固醇肉芽肿": "normal_vs_cholesterol_granuloma",
     "正常vs分泌性中耳炎": "normal_vs_ome",
     "分泌性中耳炎vs胆固醇肉芽肿": "ome_vs_cholesterol_granuloma",
     "中耳胆脂瘤vs慢性化脓性中耳炎": "cholesteatoma_vs_csoma",
+    "胆脂瘤vs其他异常": "cholesteatoma_vs_other_abnormal",
 }
 
 
@@ -131,4 +152,3 @@ def resolve_task(name: str) -> TaskSpec:
         known = ", ".join(sorted(TASKS.keys()))
         raise ValueError(f"unknown task: {name!r}. known: {known}")
     return TASKS[key]
-

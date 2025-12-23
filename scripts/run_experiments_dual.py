@@ -50,7 +50,7 @@ def main(
     epochs_1pct: int = typer.Option(200, help="1% 的 max epochs（配合 early-stop；默认偏多，因为每 epoch steps 很少）"),
     epochs_20pct: int = typer.Option(80, help="20% 的 max epochs（配合 early-stop）"),
     epochs_100pct: int = typer.Option(40, help="100% 的 max epochs（配合 early-stop；默认偏少，因为每 epoch steps 很多）"),
-    early_stop_patience: int = typer.Option(5, help="早停 patience（0=关闭；默认更小以减少过拟合）"),
+    early_stop_patience: int = typer.Option(20, help="早停 patience（0=关闭）"),
     early_stop_metric: str = typer.Option("macro_f1", help="val_loss | macro_f1 | macro_recall | macro_specificity | weighted_f1"),
     early_stop_min_delta: float = typer.Option(0.001, help="最小提升幅度"),
     weight_decay: float = typer.Option(0.05, help="AdamW weight decay（更强正则）"),

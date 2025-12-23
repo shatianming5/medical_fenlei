@@ -30,7 +30,7 @@ def _crop_side(img: np.ndarray, side: str, *, flip_right: bool) -> np.ndarray:
     if side == "right":
         out = img[:, mid:]
         if flip_right:
-            out = np.fliplr(out)
+            out = np.fliplr(out).copy()
         return out
     raise ValueError(f"invalid side: {side}")
 
@@ -97,4 +97,3 @@ class EarCTSideDataset(Dataset):
         }
 
         return {"x": x, "label": torch.tensor(label, dtype=torch.long), "meta": meta}
-

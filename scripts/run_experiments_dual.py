@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -64,6 +65,10 @@ def main(
 
     py = sys.executable
 
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     for pct in pct_list:
         epochs = _epochs_for_pct(pct, e1=epochs_1pct, e20=epochs_20pct, e100=epochs_100pct)
         for model in model_list:
@@ -116,7 +121,7 @@ def main(
             print("\n$ " + " ".join(cmd), flush=True)
             if dry_run:
                 continue
-            subprocess.run(cmd, check=True)
+            subprocess.run(cmd, check=True, env=env)
 
 
 if __name__ == "__main__":

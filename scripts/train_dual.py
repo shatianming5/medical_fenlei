@@ -299,6 +299,7 @@ def main(
     tf32: bool = typer.Option(True, help="CUDA: 允许 TF32 加速 matmul/conv"),
     cudnn_benchmark: bool = typer.Option(True, help="CUDA: cudnn benchmark 以提高吞吐"),
     compile: bool = typer.Option(False, help="PyTorch 2: torch.compile 以提高吞吐"),
+    empty_cache: bool = typer.Option(True, "--empty-cache/--no-empty-cache", help="每个 epoch 的 train/val 之间调用 torch.cuda.empty_cache，避免碎片导致 OOM"),
     early_stop_patience: int = typer.Option(0, help="早停 patience（0=关闭）"),
     early_stop_metric: str = typer.Option("val_loss", help="val_loss | macro_f1 | macro_recall | macro_specificity | weighted_f1"),
     early_stop_min_delta: float = typer.Option(0.0, help="最小提升幅度（避免抖动）"),
@@ -456,6 +457,10 @@ def main(
             scaler=scaler,
             amp=amp,
         )
+
+        if empty_cache and device.type == "cuda":
+            torch.cuda.empty_cache()
+
         val_m = _run_epoch(
             model=net,
             loader=val_loader,

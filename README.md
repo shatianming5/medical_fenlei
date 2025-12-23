@@ -28,7 +28,7 @@ tail -f logs/extract_all.log
 python scripts/build_index.py --out-csv artifacts/dataset_index.csv
 ```
 
-2) 生成 1% / 20% / 100% 三层训练集（按类别分层等比例抽样，输出到 `artifacts/splits/`，不入库）：
+2) 生成 1% / 20% / 100% 三层训练集（按类别分层等比例抽样，输出到 `artifacts/splits_dual/`，不入库）：
 
 ```bash
 python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual --ratios 0.01,0.2,1.0

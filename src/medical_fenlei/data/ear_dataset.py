@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -268,11 +269,16 @@ class EarCTHUEarDataset(Dataset):
         side = str(row["side"])
         series_relpath = str(row["series_relpath"])
         y = float(row["y"])
+        try:
+            label_code = int(row.get("label_code", -1))
+        except Exception:
+            label_code = -1
 
         meta = {
             "exam_id": exam_id,
             "side": side,
             "series_relpath": series_relpath,
+            "label_code": int(label_code),
             "slice_indices": [-1 for _ in range(int(self.spec.num_slices))],
             "midline_x": -1,
             "n_files": -1,
@@ -285,6 +291,14 @@ class EarCTHUEarDataset(Dataset):
                 hu = torch.from_numpy(arr.astype(np.float32))
                 out = {"hu": hu, "y": torch.tensor(y, dtype=torch.float32)}
                 if self.return_meta:
+                    meta_path = cache_path.with_suffix(".json")
+                    if meta_path.exists():
+                        try:
+                            meta2 = json.loads(meta_path.read_text(encoding="utf-8"))
+                            if isinstance(meta2, dict):
+                                meta.update(meta2)
+                        except Exception:
+                            pass
                     out["meta"] = meta
                 return out
 
@@ -297,6 +311,8 @@ class EarCTHUEarDataset(Dataset):
                 with open(tmp_path, "wb") as f:
                     np.save(f, arr)
                 os.replace(tmp_path, cache_path)
+                meta_path = cache_path.with_suffix(".json")
+                meta_path.write_text(json.dumps(meta2, ensure_ascii=False) + "\n", encoding="utf-8")
             finally:
                 try:
                     if tmp_path.exists():

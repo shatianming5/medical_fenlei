@@ -1,0 +1,127 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+from monai.transforms import Resize
+from torch.utils.data import Dataset
+
+from medical_fenlei.constants import CLASS_ID_TO_NAME
+from medical_fenlei.data.dicom import list_dicom_files, read_dicom_image
+
+
+def _evenly_spaced_indices(n: int, k: int) -> list[int]:
+    if n <= 0 or k <= 0:
+        return []
+    if n >= k:
+        return np.linspace(0, n - 1, num=k, dtype=int).tolist()
+    idx = np.linspace(0, n - 1, num=n, dtype=int).tolist()
+    while len(idx) < k:
+        idx.append(n - 1)
+    return idx
+
+
+def _crop_left_right(img: np.ndarray, *, flip_right: bool) -> tuple[np.ndarray, np.ndarray]:
+    _, w = img.shape
+    mid = w // 2
+    left = img[:, :mid]
+    right = img[:, mid:]
+    if flip_right:
+        right = np.fliplr(right).copy()
+    return left, right
+
+
+def _code_to_label(code) -> tuple[int, bool]:
+    if code is None or (isinstance(code, float) and np.isnan(code)):
+        return -1, False
+    try:
+        code_int = int(code)
+    except Exception:
+        return -1, False
+    if not (1 <= code_int <= len(CLASS_ID_TO_NAME)):
+        return -1, False
+    return code_int - 1, True
+
+
+class EarCTDualDataset(Dataset):
+    """
+    One-exam dual-output dataset (left + right ear).
+
+    Expected columns in index_df:
+      - exam_id, date, series_relpath
+      - left_code, right_code (1..6)
+
+    Returns:
+      - image: (2, 1, D, H, W)  # 0=left, 1=right
+      - label: (2,) with -1 for missing
+      - label_mask: (2,) bool indicating present labels
+    """
+
+    def __init__(
+        self,
+        *,
+        index_df: pd.DataFrame,
+        dicom_root: Path,
+        num_slices: int = 32,
+        image_size: int = 224,
+        flip_right: bool = True,
+    ) -> None:
+        self.index = index_df.reset_index(drop=True)
+        self.dicom_root = dicom_root
+        self.num_slices = int(num_slices)
+        self.image_size = int(image_size)
+        self.flip_right = bool(flip_right)
+
+        self._resize = Resize(
+            spatial_size=(self.num_slices, self.image_size, self.image_size),
+            mode="trilinear",
+            align_corners=False,
+        )
+
+    def __len__(self) -> int:
+        return len(self.index)
+
+    def __getitem__(self, i: int):
+        row = self.index.iloc[i]
+        series_dir = self.dicom_root / str(row["series_relpath"])
+
+        left_label, left_present = _code_to_label(row.get("left_code"))
+        right_label, right_present = _code_to_label(row.get("right_code"))
+
+        files = list_dicom_files(series_dir)
+        indices = _evenly_spaced_indices(len(files), self.num_slices)
+        if not indices:
+            raise RuntimeError(f"no dicom files in: {series_dir}")
+
+        left_slices: list[np.ndarray] = []
+        right_slices: list[np.ndarray] = []
+        for j in indices:
+            img = read_dicom_image(files[j])
+            left, right = _crop_left_right(img, flip_right=self.flip_right)
+            left_slices.append(left)
+            right_slices.append(right)
+
+        left_vol = np.stack(left_slices, axis=0).astype(np.float32)  # (D, H, W/2)
+        right_vol = np.stack(right_slices, axis=0).astype(np.float32)
+
+        left_t = torch.from_numpy(left_vol)[None, ...]  # (1, D, H, W)
+        right_t = torch.from_numpy(right_vol)[None, ...]
+
+        left_t = self._resize(left_t)
+        right_t = self._resize(right_t)
+
+        image = torch.stack([left_t, right_t], dim=0)  # (2, 1, D, H, W)
+
+        meta = {
+            "exam_id": int(row["exam_id"]),
+            "date": str(row["date"]),
+            "series_relpath": str(row["series_relpath"]),
+        }
+
+        label = torch.tensor([left_label, right_label], dtype=torch.long)
+        label_mask = torch.tensor([left_present, right_present], dtype=torch.bool)
+
+        return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
+

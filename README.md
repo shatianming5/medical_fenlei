@@ -34,7 +34,13 @@ python scripts/build_index.py --out-csv artifacts/dataset_index.csv
 python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual --ratios 0.01,0.2,1.0
 ```
 
-3) 一次检查 -> 左/右双输出 6 分类训练（MONAI 3D ResNet10；输出到 `outputs/`，不入库）：
+3) （强烈建议）先构建缓存，避免每个 epoch 反复解码 DICOM 导致 GPU 空转：
+
+```bash
+python scripts/build_cache_dual.py --pct 100 --num-slices 32 --image-size 224 --num-workers 16
+```
+
+4) 一次检查 -> 左/右双输出 6 分类训练（输出到 `outputs/`，不入库）：
 
 ```bash
 python scripts/train_dual.py --pct 1   --model dual_resnet10_3d
@@ -42,10 +48,16 @@ python scripts/train_dual.py --pct 20  --model dual_resnet50_3d --auto-batch
 python scripts/train_dual.py --pct 100 --model dual_vit_3d --auto-batch
 ```
 
-4) 推理（输出到 `artifacts/`，不入库）：
+5) 推理（输出到 `artifacts/`，不入库）：
 
 ```bash
 python scripts/predict_dual.py --checkpoint outputs/<run>/checkpoints/best.pt --index-csv artifacts/splits_dual/100pct/val.csv --out-csv artifacts/predictions_dual.csv
+```
+
+6) 一键按“数据量优先 -> 模型其次”依次跑完整个实验矩阵（会很久，建议 tmux/screen）：
+
+```bash
+python scripts/run_experiments_dual.py
 ```
 
 更多说明见 `docs/TASK.md`。

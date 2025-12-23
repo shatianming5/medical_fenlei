@@ -61,3 +61,26 @@
 训练时会在每个 epoch 评估验证集，并输出：
 - `outputs/<run>/metrics.jsonl`：每个 epoch 的 loss/acc + `macro_recall`(=敏感度)/`macro_specificity`/`macro_f1` 等
 - `outputs/<run>/reports/epoch_<n>.json`：完整明细（每类 precision/recall/specificity/F1 + confusion matrix）
+
+## 性能（榨干 GPU/显存）
+
+建议流程：
+
+1) 先跑一次缓存构建（CPU 密集，但只需一次；之后训练/评估会快很多）：
+
+```bash
+python scripts/build_cache_dual.py --pct 100 --num-slices 32 --image-size 224 --num-workers 16
+```
+
+2) 训练时开启：
+- `--auto-batch`：自动找最大 batch_size
+- `--amp`：默认开启，可显著省显存/提速
+- `--compile`：可选（PyTorch2），可能提速也可能变慢，建议单独对比
+
+3) 如果想按“数据量优先 -> 模型其次”完整扫一遍：
+
+```bash
+python scripts/run_experiments_dual.py
+```
+
+默认 epochs（可改）：1%/20%/100% 分别是 80/30/12（见 `scripts/run_experiments_dual.py`）。

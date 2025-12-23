@@ -299,6 +299,9 @@ def main(
     tf32: bool = typer.Option(True, help="CUDA: 允许 TF32 加速 matmul/conv"),
     cudnn_benchmark: bool = typer.Option(True, help="CUDA: cudnn benchmark 以提高吞吐"),
     compile: bool = typer.Option(False, help="PyTorch 2: torch.compile 以提高吞吐"),
+    early_stop_patience: int = typer.Option(0, help="早停 patience（0=关闭）"),
+    early_stop_metric: str = typer.Option("val_loss", help="val_loss | macro_f1 | macro_recall | macro_specificity | weighted_f1"),
+    early_stop_min_delta: float = typer.Option(0.0, help="最小提升幅度（避免抖动）"),
 ) -> None:
     train_csv, val_csv = _resolve_split_paths(splits_root, pct)
     train_df = pd.read_csv(train_csv)
@@ -439,7 +442,10 @@ def main(
     typer.echo(f"train_exams: {len(train_ds)}  val_exams: {len(val_ds)}")
     typer.echo(f"output: {out}")
 
-    best_val = float("inf")
+    metric_mode = "min" if early_stop_metric == "val_loss" else "max"
+    best_score = float("inf") if metric_mode == "min" else float("-inf")
+    bad_epochs = 0
+
     for epoch in range(1, epochs + 1):
         train_m = _run_epoch(
             model=net,
@@ -467,6 +473,17 @@ def main(
         report_path = report_dir / f"epoch_{epoch}.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+        monitor_map = {
+            "val_loss": float(val_m["loss"]),
+            "macro_recall": float(report["macro_recall"]),
+            "macro_specificity": float(report["macro_specificity"]),
+            "macro_f1": float(report["macro_f1"]),
+            "weighted_f1": float(report["weighted_f1"]),
+        }
+        if early_stop_metric not in monitor_map:
+            raise ValueError(f"unknown early_stop_metric: {early_stop_metric}")
+        score = float(monitor_map[early_stop_metric])
+
         rec = {
             "epoch": epoch,
             "train": train_m,
@@ -474,6 +491,7 @@ def main(
             "val_metrics": {k: report[k] for k in ("accuracy", "macro_recall", "macro_specificity", "macro_f1", "weighted_f1", "total")},
             "model": {"name": spec.name, "kwargs": spec.kwargs},
             "batch_size": int(batch_size),
+            "early_stop": {"metric": early_stop_metric, "mode": metric_mode, "score": score, "patience": int(early_stop_patience), "min_delta": float(early_stop_min_delta)},
         }
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -498,11 +516,27 @@ def main(
             "batch_size": int(batch_size),
             "state_dict": net.state_dict(),
             "val_loss": val_m["loss"],
+            "early_stop_metric": early_stop_metric,
+            "early_stop_score": score,
         }
         torch.save(ckpt, ckpt_dir / "last.pt")
-        if val_m["loss"] < best_val:
-            best_val = val_m["loss"]
+
+        improved = False
+        if metric_mode == "min":
+            improved = (best_score - score) > float(early_stop_min_delta)
+        else:
+            improved = (score - best_score) > float(early_stop_min_delta)
+
+        if improved:
+            best_score = score
+            bad_epochs = 0
             torch.save(ckpt, ckpt_dir / "best.pt")
+        else:
+            bad_epochs += 1
+
+        if early_stop_patience > 0 and bad_epochs >= int(early_stop_patience):
+            typer.echo(f"early stopping: no improvement on {early_stop_metric} for {early_stop_patience} epochs")
+            break
 
 
 if __name__ == "__main__":

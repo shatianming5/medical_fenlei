@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import os
 from pathlib import Path
 
 import numpy as np
@@ -67,12 +69,16 @@ class EarCTDualDataset(Dataset):
         num_slices: int = 32,
         image_size: int = 224,
         flip_right: bool = True,
+        cache_dir: Path | None = None,
+        cache_dtype: str = "float16",
     ) -> None:
         self.index = index_df.reset_index(drop=True)
         self.dicom_root = dicom_root
         self.num_slices = int(num_slices)
         self.image_size = int(image_size)
         self.flip_right = bool(flip_right)
+        self.cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self.cache_dtype = str(cache_dtype)
 
         self._resize = Resize(
             spatial_size=(self.num_slices, self.image_size, self.image_size),
@@ -80,15 +86,35 @@ class EarCTDualDataset(Dataset):
             align_corners=False,
         )
 
+        if self.cache_dir is not None:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+
     def __len__(self) -> int:
         return len(self.index)
+
+    def _cache_path(self, *, exam_id: int, series_relpath: str) -> Path:
+        key = f"{series_relpath}|d={self.num_slices}|s={self.image_size}|flip={int(self.flip_right)}"
+        h = hashlib.md5(key.encode("utf-8")).hexdigest()[:16]
+        return self.cache_dir / f"{exam_id}_{h}.npy"
 
     def __getitem__(self, i: int):
         row = self.index.iloc[i]
         series_dir = self.dicom_root / str(row["series_relpath"])
+        exam_id = int(row["exam_id"])
+        series_relpath = str(row["series_relpath"])
 
         left_label, left_present = _code_to_label(row.get("left_code"))
         right_label, right_present = _code_to_label(row.get("right_code"))
+
+        if self.cache_dir is not None:
+            cache_path = self._cache_path(exam_id=exam_id, series_relpath=series_relpath)
+            if cache_path.exists():
+                arr = np.load(cache_path)
+                image = torch.from_numpy(arr).to(torch.float32)
+                meta = {"exam_id": exam_id, "date": str(row["date"]), "series_relpath": series_relpath}
+                label = torch.tensor([left_label, right_label], dtype=torch.long)
+                label_mask = torch.tensor([left_present, right_present], dtype=torch.bool)
+                return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
 
         files = list_dicom_files(series_dir)
         indices = _evenly_spaced_indices(len(files), self.num_slices)
@@ -115,13 +141,33 @@ class EarCTDualDataset(Dataset):
         image = torch.stack([left_t, right_t], dim=0)  # (2, 1, D, H, W)
 
         meta = {
-            "exam_id": int(row["exam_id"]),
+            "exam_id": exam_id,
             "date": str(row["date"]),
-            "series_relpath": str(row["series_relpath"]),
+            "series_relpath": series_relpath,
         }
 
         label = torch.tensor([left_label, right_label], dtype=torch.long)
         label_mask = torch.tensor([left_present, right_present], dtype=torch.bool)
 
-        return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}
+        if self.cache_dir is not None:
+            cache_path = self._cache_path(exam_id=exam_id, series_relpath=series_relpath)
+            tmp_path = cache_path.with_suffix(cache_path.suffix + f".{os.getpid()}.tmp")
+            try:
+                arr = image.detach().cpu().numpy()
+                if self.cache_dtype == "float16":
+                    arr = arr.astype(np.float16)
+                elif self.cache_dtype == "float32":
+                    arr = arr.astype(np.float32)
+                else:
+                    raise ValueError(f"unsupported cache_dtype: {self.cache_dtype!r}")
+                with open(tmp_path, "wb") as f:
+                    np.save(f, arr)
+                os.replace(tmp_path, cache_path)
+            finally:
+                try:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                except Exception:
+                    pass
 
+        return {"image": image, "label": label, "label_mask": label_mask, "meta": meta}

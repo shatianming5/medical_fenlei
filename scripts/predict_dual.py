@@ -9,16 +9,20 @@ from torch.utils.data import DataLoader
 
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.dual_dataset import EarCTDualDataset
-from medical_fenlei.models.dual_resnet3d import DualResNet10_3D
+from medical_fenlei.models.dual_factory import make_dual_model
 from medical_fenlei.paths import infer_dicom_root
 
 app = typer.Typer(add_completion=False)
 
 
-def _make_model(name: str, *, num_classes: int) -> torch.nn.Module:
-    if name == "dual_resnet10_3d":
-        return DualResNet10_3D(num_classes=num_classes, in_channels=1)
-    raise ValueError(f"unknown model: {name}")
+def _strip_compile_prefix(state_dict: dict) -> dict:
+    # torch.compile state_dict keys often start with "_orig_mod."
+    if not state_dict:
+        return state_dict
+    keys = list(state_dict.keys())
+    if any(k.startswith("_orig_mod.") for k in keys):
+        return {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    return state_dict
 
 
 @app.command()
@@ -29,8 +33,8 @@ def main(
     out_csv: Path = typer.Option(Path("artifacts/predictions_dual.csv")),
     batch_size: int = typer.Option(1),
     num_workers: int = typer.Option(4),
-    num_slices: int = typer.Option(32),
-    image_size: int = typer.Option(224),
+    num_slices: int | None = typer.Option(None, help="默认从 checkpoint 读取"),
+    image_size: int | None = typer.Option(None, help="默认从 checkpoint 读取"),
 ) -> None:
     df = pd.read_csv(index_csv)
     if df.empty:
@@ -38,16 +42,39 @@ def main(
 
     dicom_root = infer_dicom_root(dicom_base)
 
-    ds = EarCTDualDataset(index_df=df, dicom_root=dicom_root, num_slices=num_slices, image_size=image_size, flip_right=True)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0)
-
     ckpt = torch.load(checkpoint, map_location="cpu")
     model_name = str(ckpt.get("model_name", "dual_resnet10_3d"))
+    model_kwargs = dict(ckpt.get("model_kwargs", {}) or {})
     num_classes = int(ckpt.get("num_classes", len(CLASS_ID_TO_NAME)))
+    if num_slices is None:
+        num_slices = int(ckpt.get("num_slices", 32))
+    if image_size is None:
+        image_size = int(ckpt.get("image_size", 224))
+
+    ds = EarCTDualDataset(index_df=df, dicom_root=dicom_root, num_slices=int(num_slices), image_size=int(image_size), flip_right=True)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=num_workers > 0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = _make_model(model_name, num_classes=num_classes).to(device)
-    model.load_state_dict(ckpt["state_dict"], strict=True)
+    img_size = (int(num_slices), int(image_size), int(image_size))
+
+    model, _ = make_dual_model(
+        model_name,
+        num_classes=num_classes,
+        in_channels=1,
+        img_size=img_size,
+        vit_patch_size=tuple(model_kwargs.get("vit_patch_size", (4, 16, 16))),
+        vit_hidden_size=int(model_kwargs.get("vit_hidden_size", 768)),
+        vit_mlp_dim=int(model_kwargs.get("vit_mlp_dim", 3072)),
+        vit_num_layers=int(model_kwargs.get("vit_num_layers", 12)),
+        vit_num_heads=int(model_kwargs.get("vit_num_heads", 12)),
+        unet_channels=tuple(model_kwargs.get("unet_channels", (16, 32, 64, 128, 256))),
+        unet_strides=tuple(model_kwargs.get("unet_strides", (2, 2, 2, 2))),
+        unet_num_res_units=int(model_kwargs.get("unet_num_res_units", 2)),
+    )
+
+    model = model.to(device)
+    state_dict = _strip_compile_prefix(dict(ckpt.get("state_dict", {}) or {}))
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
 
     rows: list[dict] = []
@@ -97,4 +124,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

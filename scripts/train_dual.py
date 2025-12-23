@@ -109,6 +109,10 @@ def _autotune_batch_size(
     def _try(bs: int) -> bool:
         torch.cuda.empty_cache()
         try:
+            # IMPORTANT: include AdamW optimizer state allocation in the probe, otherwise
+            # auto_batch can be overly optimistic for larger models (e.g. ResNet34+),
+            # leading to OOM at the first real optimizer step.
+            optimizer = torch.optim.AdamW(model.parameters(), lr=0.0)
             x = torch.randn(bs, 2, 1, num_slices, image_size, image_size, device=device)
             y = torch.randint(0, num_classes, (bs, 2), device=device, dtype=torch.long).view(-1)
 
@@ -126,12 +130,15 @@ def _autotune_batch_size(
                 logits = model(x).reshape(-1, num_classes)
                 loss = loss_fn(logits, y)
             loss.backward()
+            optimizer.step()
             torch.cuda.synchronize()
-            del x, y, logits, loss
+            del optimizer, x, y, logits, loss
+            model.zero_grad(set_to_none=True)
             return True
         except RuntimeError as e:
             msg = str(e).lower()
             if "out of memory" in msg or "cuda" in msg and "oom" in msg:
+                model.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()
                 return False
             raise

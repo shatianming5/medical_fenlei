@@ -1,0 +1,46 @@
+# Data (very large / private)
+data/**
+archives/**
+logs/**
+metadata/**
+
+# Keep directory docs (no data)
+!data/README.md
+!archives/README.md
+!logs/README.md
+!metadata/README.md
+
+# ML artifacts (large)
+outputs/**
+checkpoints/**
+runs/**
+wandb/**
+mlruns/**
+lightning_logs/**
+tensorboard/**
+
+*.ckpt
+*.pth
+*.pt
+*.onnx
+*.npz
+*.npy
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets
+.env
+.envrc
+*.pem
+
+# Conda / venv
+.conda/
+venv/
+.venv/
+miniconda3/
+

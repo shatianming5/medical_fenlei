@@ -184,57 +184,63 @@ def _run_epoch(
             raise ValueError("num_classes is required when collect_cm=True")
         cm = torch.zeros((int(num_classes), int(num_classes)), dtype=torch.int64)
 
-    for batch in loader:
-        x = batch["image"].to(device, non_blocking=True)
-        y = batch["label"].to(device, non_blocking=True)
-        m = batch["label_mask"].to(device, non_blocking=True)
+    if is_train:
+        grad_ctx = nullcontext()
+    else:
+        grad_ctx = torch.inference_mode() if hasattr(torch, "inference_mode") else torch.no_grad()
 
-        amp_enabled = amp and device.type == "cuda"
-        if amp_enabled:
-            if hasattr(torch, "amp"):
-                autocast_ctx = torch.amp.autocast(device_type="cuda")
+    with grad_ctx:
+        for batch in loader:
+            x = batch["image"].to(device, non_blocking=True)
+            y = batch["label"].to(device, non_blocking=True)
+            m = batch["label_mask"].to(device, non_blocking=True)
+
+            amp_enabled = amp and device.type == "cuda"
+            if amp_enabled:
+                if hasattr(torch, "amp"):
+                    autocast_ctx = torch.amp.autocast(device_type="cuda")
+                else:
+                    autocast_ctx = torch.cuda.amp.autocast()
             else:
-                autocast_ctx = torch.cuda.amp.autocast()
-        else:
-            autocast_ctx = nullcontext()
+                autocast_ctx = nullcontext()
 
-        with autocast_ctx:
-            logits = model(x)  # (B,2,C)
-            loss = _masked_ce_loss(logits, y, m, loss_fn=loss_fn)
+            with autocast_ctx:
+                logits = model(x)  # (B,2,C)
+                loss = _masked_ce_loss(logits, y, m, loss_fn=loss_fn)
 
-        if is_train:
-            optimizer.zero_grad(set_to_none=True)
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                optimizer.step()
+            if is_train:
+                optimizer.zero_grad(set_to_none=True)
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    optimizer.step()
 
-        metrics = _masked_accuracy(logits.detach(), y.detach(), m.detach())
-        left_n = int(m[:, 0].sum().item())
-        right_n = int(m[:, 1].sum().item())
+            metrics = _masked_accuracy(logits.detach(), y.detach(), m.detach())
+            left_n = int(m[:, 0].sum().item())
+            right_n = int(m[:, 1].sum().item())
 
-        total_loss += float(loss.detach().cpu().item())
-        total_acc += float(metrics["acc"]) * int(metrics["n"])
-        total_left += float(metrics["left_acc"]) * left_n
-        total_right += float(metrics["right_acc"]) * right_n
-        total_n += int(metrics["n"])
-        total_left_n += left_n
-        total_right_n += right_n
-        n_batches += 1
+            total_loss += float(loss.detach().cpu().item())
+            total_acc += float(metrics["acc"]) * int(metrics["n"])
+            total_left += float(metrics["left_acc"]) * left_n
+            total_right += float(metrics["right_acc"]) * right_n
+            total_n += int(metrics["n"])
+            total_left_n += left_n
+            total_right_n += right_n
+            n_batches += 1
 
-        if cm is not None:
-            pred = logits.detach().argmax(dim=-1).cpu()
-            y_cpu = y.detach().cpu()
-            m_cpu = m.detach().cpu().bool()
-            y_flat = y_cpu[m_cpu].view(-1).to(torch.int64)
-            p_flat = pred[m_cpu].view(-1).to(torch.int64)
-            if y_flat.numel() > 0:
-                idx = y_flat * int(num_classes) + p_flat
-                binc = torch.bincount(idx, minlength=int(num_classes) * int(num_classes))
-                cm += binc.view(int(num_classes), int(num_classes))
+            if cm is not None:
+                pred = logits.detach().argmax(dim=-1).cpu()
+                y_cpu = y.detach().cpu()
+                m_cpu = m.detach().cpu().bool()
+                y_flat = y_cpu[m_cpu].view(-1).to(torch.int64)
+                p_flat = pred[m_cpu].view(-1).to(torch.int64)
+                if y_flat.numel() > 0:
+                    idx = y_flat * int(num_classes) + p_flat
+                    binc = torch.bincount(idx, minlength=int(num_classes) * int(num_classes))
+                    cm += binc.view(int(num_classes), int(num_classes))
 
     if total_n <= 0:
         out = {"loss": total_loss / max(n_batches, 1), "acc": 0.0, "left_acc": 0.0, "right_acc": 0.0, "n": 0}

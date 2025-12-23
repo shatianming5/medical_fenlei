@@ -11,12 +11,13 @@
 **已有**
 - 固定验证集（dual split：`val=772 exams / 1538 ears`）
 - 每次训练输出 `metrics.jsonl` 与每 epoch 的分类报告（dual 6 类/二分类）
+- 多 seed 跑法（耳朵级 2D 路线）：`scripts/run_seeds_ear2d.py`
+- bootstrap 置信区间（按 exam_id 抽样，耳朵级 2D 路线）：`scripts/eval_ear2d.py`
+- 解释性：attention top-k 切片（`scripts/eval_ear2d.py`），Grad-CAM（`scripts/gradcam_ear2d.py`）
+- 可复现配置：每次 ear2d 训练保存 `run_config.json`（含 git sha）
 
-**缺失/待补**
-- 多 seed（≥3）稳定性报告（mean±std）
-- bootstrap 置信区间（按 exam_id 抽样）
-- 解释性产出（关键切片/Grad-CAM/相似病例检索）
-- “数据清单/预处理/训练配置/代码版本”一一对应的可审计资产（manifest + run config + git sha）
+**仍可增强（可选）**
+- 汇总 mean±std 的统一排行榜（目前 `scripts/run_seeds_ear2d.py` 会输出 per-run CSV，可继续做更漂亮的 Markdown 汇总）
 
 ---
 
@@ -25,12 +26,13 @@
 **已有**
 - `artifacts/dataset_index.csv`（exam 级：`exam_id/date/series_relpath/n_instances/left_code/right_code`）
 - exam 级切分（`scripts/make_splits_dual.py`）避免左右耳泄漏
+- 耳朵级 manifest：`scripts/build_manifest_ears.py`
+- 病人级泄漏检查：`scripts/check_patient_leakage.py`
+- patient-level split（可选开关）：`scripts/make_splits_dual.py --patient-split`
+- QA 汇总：`scripts/qa_manifest_ears.py`
 
-**缺失/待补**
-- 统一“耳朵级” manifest（每耳一行：side/label/路径/spacing/thickness/vendor/kernel 等）
-- 病人级泄漏检查（若能从 DICOM 提取 PatientID；否则用弱标识 hash）
-- 每个二分类 task 的 val 正例数/占比与审计报表
-- QA 三张表：扫描参数分布、切片覆盖/范围分布、可疑样本列表
+**仍可增强（可选）**
+- 如果 patient_id 缺失，可加入更强的弱标识策略（目前已支持 patient_id/name hash + study_uid fallback）
 
 ---
 
@@ -38,11 +40,12 @@
 
 **已有**
 - 二分类 task spec：`src/medical_fenlei/tasks.py`（dual 训练/推理已接入 `--label-task`）
+- One-vs-Rest 代表任务：`normal_vs_abnormal`（包含 code6）
+- 鉴别诊断代表任务：`cholesteatoma_vs_other_abnormal`
+- code4 的 few-shot 流水线：`scripts/extract_embeddings_ear2d.py` + `scripts/fewshot_code4.py`
 
-**缺失/待补**
-- 每个 task 同时提供 `pairwise` 与 `one-vs-rest` 两种口径（并在 manifest 中形成 `task_valid_mask`）
-- 补齐推荐任务：`正常 vs 非正常(1,2,3,4,6)`、`胆脂瘤(2) vs 其他异常(1,3,4,6)` 等
-- 明确 code4（胆固醇肉芽肿）走 few-shot/embedding 路线，而不是常规端到端二分类
+**仍可增强（可选）**
+- 为更多任务补齐 pairwise/ovr 的双口径版本（当前已覆盖关键推荐任务）
 
 ---
 
@@ -51,14 +54,16 @@
 **已有**
 - 中线一刀切左右分割 + 均匀 32 切片采样（dual/side dataset）
 - 右耳翻转对齐方向
+- ear2d 路线的改进预处理（`src/medical_fenlei/data/ear_dataset.py`）：
+  - slice 排序：`ImagePositionPatient/InstanceNumber`（`list_dicom_files_ipp`）
+  - WL/WW jitter（训练时）：`scripts/train_ear2d.py`
+  - 骨结构 midline（粗）：`_bone_midline_x`
+  - z 连续块采样（启发式，`--sampling air_block`）
+  - 颞骨粗 crop（骨 bbox + lateral bias，`crop_size`）
 
-**缺失/待补**
-- WL/WW jitter（CT 专用增强）
-- slice 排序：使用 `ImagePositionPatient` / `InstanceNumber` 而非文件名启发式
-- 更稳的左右分割（骨结构对称轴/骨投影中线）
-- z 采样从“全序列均匀”升级为“颞骨区域连续块”（骨+气房启发式）
-- 更聚焦的 patch crop（减少无关结构）
-- （可选）统一物理尺度 resample spacing（离线预处理）
+**仍可增强（可选）**
+- 方向一致性（基于 ImageOrientationPatient 的更严格对齐）
+- 统一物理尺度 resample spacing（离线预处理）
 
 ---
 
@@ -67,10 +72,11 @@
 **已有**
 - 3D dual backbone：ResNet/UNet/ViT（MONAI）
 - 2D baseline：`SliceMeanResNet`（mean pooling across slices）
+- 2D + attention pooling：`src/medical_fenlei/models/slice_attention_resnet.py`
+- ear-level 训练入口：`scripts/train_ear2d.py`
 
 **缺失/待补**
-- attention pooling / 轻量 transformer 聚合（输出关键切片权重）
-- ear-level batch 的训练主流程（按耳为样本，便于不均衡采样/解释）
+- （可选）轻量 transformer 聚合（当前已提供 attention pooling baseline）
 
 ---
 
@@ -78,14 +84,16 @@
 
 **已有**
 - AdamW、weight_decay、label_smoothing、基础增强、AMP、auto-batch（dual）
+- ear2d 默认配方（`scripts/train_ear2d.py`）：
+  - Balanced sampler（WeightedRandomSampler）
+  - BCEWithLogits + pos_weight（clip）
+  - cosine decay + warmup（step 级）
+  - grad clip（1.0）
+  - early stop（默认 AUPRC）
 
 **缺失/待补**
-- Balanced batch（WeightedRandomSampler / 自定义 batch sampler）
-- 二分类 loss：BCEWithLogits + pos_weight（并 clip）
 - （可选）Focal loss
-- cosine decay + warmup、梯度裁剪
-- 早停指标以 AUPRC 或 sensitivity@high-specificity 为主（而非 accuracy）
-- 1%/20%：linear probe → fine-tune 的公平对比策略
+- （可选）更严格的“linear probe → fine-tune”自动化（目前提供 `--freeze-backbone-epochs`）
 
 ---
 
@@ -99,18 +107,20 @@
 
 ## 7) code4 few-shot（专用）
 
-**缺失/待补**
-- 先训练“通用表征”（推荐：正常 vs 异常）
-- embedding 上做 prototype / 正则化 logistic / kNN
-- 评估强制 bootstrap CI（按 exam_id）
+**已补齐**
+- embedding 抽取：`scripts/extract_embeddings_ear2d.py`
+- prototype + kNN 检索式解释：`scripts/fewshot_code4.py`
+- 评估 bootstrap CI（按 exam_id）：`medical_fenlei.metrics.bootstrap_binary_metrics_by_exam`
 
 ---
 
 ## 8) 噪声与域差闭环
 
-**缺失/待补**
-- 输出可疑样本列表：高置信错分、长期高 loss、按 date_match=False 分组
-- （可选）小损失优先/样本降权策略
+**已补齐（基础版）**
+- 可疑样本列表（高置信错分 + top loss）：`scripts/eval_ear2d.py` 输出到 `reports/`
+
+**仍可增强（可选）**
+- 训练中逐步降权（小损失优先/robust reweighting）
 
 ---
 
@@ -118,21 +128,19 @@
 
 **已有**
 - dual：macro_recall/specificity/f1 等（多类）
+- ear2d（二分类）：AUROC/AUPRC、Sensitivity/Specificity、Sensitivity@95%Spec + bootstrap CI：`scripts/eval_ear2d.py`
 
-**缺失/待补**
-- 二分类：AUROC/AUPRC、Sensitivity/Specificity、Sensitivity@95%Specificity
-- 阈值策略固定（0.5 或训练内 calibration）
-- bootstrap CI（按 exam_id）
-- 3-seed 稳定性汇总（mean±std + CI）
+**仍可增强（可选）**
+- 阈值校准（train 内 calibration/temperature scaling）
 
 ---
 
 ## 10) 可解释性
 
-**缺失/待补**
-- attention 权重 top-k 切片输出
-- slice-level Grad-CAM（对 top slice）
-- embedding 最近邻检索（相似病例）
+**已补齐（基础版）**
+- attention top-k 切片：`scripts/eval_ear2d.py`（写入 `predictions_val.csv`）
+- slice-level Grad-CAM：`scripts/gradcam_ear2d.py`
+- case-based 检索（few-shot/kNN）：`scripts/fewshot_code4.py`
 
 ---
 
@@ -140,8 +148,7 @@
 
 **已有**
 - dual volume cache（`cache/dual_volumes`）
+- ear-level HU cache（`cache/ears_hu`）：`scripts/build_cache_ears.py`
 
-**缺失/待补**
-- 离线预处理“耳朵级”产物（crop + 对齐 + 采样 + WL/WW + normalize）
-- DataLoader prefetch/persistent_workers 等进一步优化（针对离线产物）
-
+**仍可增强（可选）**
+- 将缓存产物压缩到 uint8 或 zarr/memmap 以进一步提速/省盘

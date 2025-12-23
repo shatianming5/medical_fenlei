@@ -34,18 +34,23 @@ python scripts/build_index.py --out-csv artifacts/dataset_index.csv
 python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual --ratios 0.01,0.2,1.0
 ```
 
+补充：`artifacts/dataset_index.csv` 共 `4012` 条检查号可匹配，其中 `153` 条左右耳均无标注，因此 split 会自动剔除，实际可用检查数为 `3859`。
+
 3) （强烈建议）先构建缓存，避免每个 epoch 反复解码 DICOM 导致 GPU 空转：
 
 ```bash
 python scripts/build_cache_dual.py --pct 100 --num-slices 32 --image-size 224 --num-workers 16
 ```
 
-4) 一次检查 -> 左/右双输出 6 分类训练（输出到 `outputs/`，不入库）：
+4) 一次检查 -> 左/右双输出训练（输出到 `outputs/`，不入库；默认 6 分类，可切二分类 `--label-task`）：
 
 ```bash
 python scripts/train_dual.py --pct 1   --model dual_resnet10_3d
 python scripts/train_dual.py --pct 20  --model dual_resnet50_3d --auto-batch
 python scripts/train_dual.py --pct 100 --model dual_vit_3d --auto-batch
+
+# 二分类示例：正常 vs 患病
+python scripts/train_dual.py --pct 20 --model dual_resnet50_3d --label-task normal_vs_diseased --auto-batch
 ```
 
 5) 推理（输出到 `artifacts/`，不入库）：
@@ -58,6 +63,9 @@ python scripts/predict_dual.py --checkpoint outputs/<run>/checkpoints/best.pt --
 
 ```bash
 python scripts/run_experiments_dual.py
+
+# 二分类示例：正常 vs 中耳胆脂瘤
+python scripts/run_experiments_dual.py --label-task normal_vs_cholesteatoma
 ```
 
 默认采用 “max epochs + early stopping” 避免手工猜 epoch；可用 `--dry-run` 先查看将执行的命令。

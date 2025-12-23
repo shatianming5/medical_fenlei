@@ -17,6 +17,30 @@
 
 标注来源：`metadata/导出数据第1~4017条数据20240329-To模型训练团队.xlsx`（仅本地使用，不入库）。
 
+## 二分类任务（当 6 分类太难时）
+
+如果直接做 6 分类效果不佳，可以拆成多组二分类任务（仍然是“一次检查 -> 左/右双输出”）：
+
+- `normal_vs_diseased`：正常(5) vs 患病(1..4)（默认不含“其他(6)”）
+- `normal_vs_csoma`：正常(5) vs 慢性化脓性中耳炎(1)
+- `normal_vs_cholesteatoma`：正常(5) vs 中耳胆脂瘤(2)
+- `normal_vs_cholesterol_granuloma`：正常(5) vs 胆固醇肉芽肿(4)
+- `normal_vs_ome`：正常(5) vs 分泌性中耳炎(3)
+- `ome_vs_cholesterol_granuloma`：分泌性中耳炎(3) vs 胆固醇肉芽肿(4)
+- `cholesteatoma_vs_csoma`：中耳胆脂瘤(2) vs 慢性化脓性中耳炎(1)
+
+说明：
+- 二分类标签固定为：`0=neg(任务名左侧)`，`1=pos(任务名右侧/患病)`
+- 训练时会自动过滤 split CSV，仅保留属于该任务相关代码的检查；同一检查中“另一侧”若不属于该任务，会被 mask 掉不参与 loss
+- 任务定义集中在 `src/medical_fenlei/tasks.py`，可按需要调整正/负样本的代码集合
+
+示例：
+
+```bash
+python scripts/train_dual.py --pct 20 --model dual_resnet50_3d --label-task normal_vs_csoma --auto-batch
+python scripts/run_experiments_dual.py --label-task normal_vs_csoma
+```
+
 ## 为什么要做 1% / 20% / 100% 三层？
 
 用于观察 **数据量缩放** 对模型效果的影响，并快速验证 pipeline：
@@ -26,6 +50,8 @@
 - 100%：最终训练
 
 本项目使用 `scripts/make_splits_dual.py` 对训练集做 **按类别分层等比例抽样**（按“耳朵标签”计数；选择 exam_id 子集），验证集按 exam_id 切分固定不变，避免左右耳泄漏，便于公平对比。
+
+补充：`artifacts/dataset_index.csv` 一共可匹配 `4012` 个 `exam_id`，其中 `153` 条左右耳均无标注，因此 split 会自动剔除，实际可用的“有至少一侧标注”的检查数为 `3859`。
 
 ## 模型选什么？
 

@@ -5,7 +5,10 @@
 - note: `outputs/` is gitignored; this file summarizes local runs.
 
 
-## 1%
+## task: `six_class`
+
+
+### 1%
 
 | model | status | best_epoch | best_metric | val_loss | acc | macro_recall | macro_spec | weighted_f1 | batch | run_dir |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -16,7 +19,7 @@
 | dual_resnet101_3d | ok | 8 | 0.1479 | 1.7111 | 0.3557 | 0.1874 | 0.8432 | 0.2769 | 4 | `outputs/dual_resnet101_3d_1pct_20251223_110515` |
 
 
-## 20%
+### 20%
 
 | model | status | best_epoch | best_metric | val_loss | acc | macro_recall | macro_spec | weighted_f1 | batch | run_dir |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -24,10 +27,10 @@
 | dual_resnet50_3d | ok | 15 | 0.2313 | 1.8588 | 0.3563 | 0.2459 | 0.8580 | 0.3446 | 5 | `outputs/dual_resnet50_3d_20pct_20251223_160110` |
 | dual_resnet18_3d | ok | 21 | 0.2262 | 2.1562 | 0.3635 | 0.2303 | 0.8545 | 0.3404 | 13 | `outputs/dual_resnet18_3d_20pct_20251223_134541` |
 | dual_resnet34_3d | ok | 18 | 0.2257 | 1.5714 | 0.4018 | 0.2419 | 0.8616 | 0.3621 | 10 | `outputs/dual_resnet34_3d_20pct_20251223_145709` |
-| dual_resnet152_3d | ok | 2 | 0.1744 | 1.6401 | 0.4031 | 0.2179 | 0.8562 | 0.3197 | 3 | `outputs/dual_resnet152_3d_20pct_20251223_193103` |
+| dual_resnet10_3d | ok | 30 | 0.1829 | 2.0419 | 0.2880 | 0.2068 | 0.8458 | 0.2713 | 13 | `outputs/dual_resnet10_3d_20pct_20251223_202731` |
 
 
-## 100%
+### 100%
 
 | model | status | best_epoch | best_metric | val_loss | acc | macro_recall | macro_spec | weighted_f1 | batch | run_dir |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|

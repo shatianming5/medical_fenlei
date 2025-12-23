@@ -17,6 +17,7 @@ from medical_fenlei.data.dual_dataset import EarCTDualDataset
 from medical_fenlei.metrics import classification_report_from_confusion
 from medical_fenlei.models.dual_factory import make_dual_model
 from medical_fenlei.paths import infer_dicom_root
+from medical_fenlei.tasks import resolve_task
 
 app = typer.Typer(add_completion=False)
 
@@ -89,6 +90,53 @@ def _parse_int_tuple(value: str, *, n: int | None = None) -> tuple[int, ...]:
     if n is not None and len(out) != n:
         raise ValueError(f"expected {n} ints, got {len(out)}: {value!r}")
     return out
+
+
+def _filter_df_for_codes(df: pd.DataFrame, *, codes: set[int]) -> pd.DataFrame:
+    if not codes:
+        return df
+    if "left_code" not in df.columns or "right_code" not in df.columns:
+        return df
+    mask = df["left_code"].isin(codes) | df["right_code"].isin(codes)
+    return df.loc[mask].reset_index(drop=True)
+
+
+def _count_codes(df: pd.DataFrame, *, codes: set[int]) -> int:
+    if not codes:
+        return 0
+    if "left_code" not in df.columns or "right_code" not in df.columns:
+        return 0
+    return int(df["left_code"].isin(codes).sum() + df["right_code"].isin(codes).sum())
+
+
+def _apply_binary_task(
+    labels: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    pos_label_ids: tuple[int, ...],
+    neg_label_ids: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Map 6-class labels (0..5) to binary labels (0/1) and update mask.
+
+    Any label not in pos/neg sets will be masked out (ignored).
+    """
+    if labels.ndim != 2:
+        raise ValueError(f"expected labels (B,2), got {tuple(labels.shape)}")
+    if mask.shape != labels.shape:
+        raise ValueError(f"mask shape {tuple(mask.shape)} != labels shape {tuple(labels.shape)}")
+
+    pos_m = torch.zeros_like(mask, dtype=torch.bool)
+    for v in pos_label_ids:
+        pos_m |= labels == int(v)
+    neg_m = torch.zeros_like(mask, dtype=torch.bool)
+    for v in neg_label_ids:
+        neg_m |= labels == int(v)
+
+    keep = mask.bool() & (pos_m | neg_m)
+    out = torch.zeros_like(labels)
+    out[pos_m] = 1
+    return out, keep
 
 
 def _autotune_batch_size(
@@ -252,6 +300,8 @@ def _run_epoch(
     aug_intensity_prob: float = 0.0,
     aug_noise_prob: float = 0.0,
     aug_gamma_prob: float = 0.0,
+    task_pos_label_ids: tuple[int, ...] | None = None,
+    task_neg_label_ids: tuple[int, ...] | None = None,
     num_classes: int | None = None,
     collect_cm: bool = False,
 ) -> dict:
@@ -283,6 +333,9 @@ def _run_epoch(
             x = batch["image"].to(device, non_blocking=True)
             y = batch["label"].to(device, non_blocking=True)
             m = batch["label_mask"].to(device, non_blocking=True)
+
+            if task_pos_label_ids is not None and task_neg_label_ids is not None:
+                y, m = _apply_binary_task(y, m, pos_label_ids=task_pos_label_ids, neg_label_ids=task_neg_label_ids)
 
             if is_train and augment:
                 x = _augment_batch(
@@ -379,6 +432,13 @@ def main(
         "dual_resnet10_3d",
         help="dual_resnet{10,18,34,50,101,152,200}_3d | dual_unet_3d | dual_vit_3d",
     ),
+    label_task: str = typer.Option(
+        "six_class",
+        help=(
+            "标签任务：six_class | normal_vs_diseased | normal_vs_csoma | normal_vs_cholesteatoma | "
+            "normal_vs_cholesterol_granuloma | normal_vs_ome | ome_vs_cholesterol_granuloma | cholesteatoma_vs_csoma"
+        ),
+    ),
     epochs: int = typer.Option(10),
     batch_size: int = typer.Option(1),
     auto_batch: bool = typer.Option(False, help="自动寻找最大 batch_size 以榨干显存（OOM 探测）"),
@@ -421,9 +481,26 @@ def main(
     if train_df.empty or val_df.empty:
         raise typer.Exit(code=2)
 
-    dicom_root = infer_dicom_root(dicom_base)
-    num_classes = len(CLASS_ID_TO_NAME)
+    task_spec = resolve_task(label_task)
+    class_id_to_name = dict(task_spec.class_id_to_name)
+    num_classes = int(task_spec.num_classes)
+    task_pos_label_ids: tuple[int, ...] | None = None
+    task_neg_label_ids: tuple[int, ...] | None = None
 
+    if task_spec.kind == "binary":
+        codes = task_spec.relevant_codes()
+        train_df = _filter_df_for_codes(train_df, codes=codes)
+        val_df = _filter_df_for_codes(val_df, codes=codes)
+        if train_df.empty or val_df.empty:
+            typer.echo(f"no data for task={task_spec.name} after filtering by codes={sorted(codes)}")
+            raise typer.Exit(code=2)
+
+        task_pos_label_ids = task_spec.pos_label_ids()
+        task_neg_label_ids = task_spec.neg_label_ids()
+        if set(task_pos_label_ids) & set(task_neg_label_ids):
+            raise ValueError(f"binary task pos/neg overlap: pos={task_pos_label_ids} neg={task_neg_label_ids}")
+
+    dicom_root = infer_dicom_root(dicom_base)
     _seed_everything(seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -543,14 +620,25 @@ def main(
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     safe_model = re.sub(r"[^A-Za-z0-9_\\-]+", "_", model)
-    out = output_dir or Path("outputs") / f"{safe_model}_{pct}pct_{ts}"
+    safe_task = re.sub(r"[^A-Za-z0-9_\\-]+", "_", str(task_spec.name))
+    out = output_dir or Path("outputs") / f"{safe_model}__{safe_task}_{pct}pct_{ts}"
     ckpt_dir = out / "checkpoints"
     report_dir = out / "reports"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
     log_path = out / "metrics.jsonl"
 
-    typer.echo(f"task: 一次检查 -> 左/右双输出 6 分类  classes={num_classes}")
+    if task_spec.kind == "binary":
+        train_pos = _count_codes(train_df, codes=set(task_spec.pos_codes))
+        train_neg = _count_codes(train_df, codes=set(task_spec.neg_codes))
+        val_pos = _count_codes(val_df, codes=set(task_spec.pos_codes))
+        val_neg = _count_codes(val_df, codes=set(task_spec.neg_codes))
+        typer.echo(
+            f"task: 一次检查 -> 左/右双输出 二分类({task_spec.name})  classes={num_classes}  "
+            f"train(pos={train_pos},neg={train_neg}) val(pos={val_pos},neg={val_neg})"
+        )
+    else:
+        typer.echo(f"task: 一次检查 -> 左/右双输出 6 分类  classes={num_classes}")
     typer.echo(
         f"model: {model}  pct={pct}%  batch_size={batch_size}  amp={amp}  "
         f"wd={float(weight_decay)}  ls={float(label_smoothing)}  augment={bool(augment)}"
@@ -604,6 +692,8 @@ def main(
                     aug_intensity_prob=float(aug_intensity_prob),
                     aug_noise_prob=float(aug_noise_prob),
                     aug_gamma_prob=float(aug_gamma_prob),
+                    task_pos_label_ids=task_pos_label_ids,
+                    task_neg_label_ids=task_neg_label_ids,
                 )
                 break
             except RuntimeError as e:
@@ -634,6 +724,8 @@ def main(
                     scaler=None,
                     amp=amp,
                     augment=False,
+                    task_pos_label_ids=task_pos_label_ids,
+                    task_neg_label_ids=task_neg_label_ids,
                     num_classes=num_classes,
                     collect_cm=True,
                 )
@@ -652,7 +744,7 @@ def main(
                 raise
 
         cm = val_m.pop("confusion_matrix")
-        report = classification_report_from_confusion(cm, class_id_to_name=CLASS_ID_TO_NAME)
+        report = classification_report_from_confusion(cm, class_id_to_name=class_id_to_name)
         report_path = report_dir / f"epoch_{epoch}.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -674,6 +766,7 @@ def main(
             "val_metrics": {k: report[k] for k in ("accuracy", "macro_recall", "macro_specificity", "macro_f1", "weighted_f1", "total")},
             "model": {"name": spec.name, "kwargs": spec.kwargs},
             "hparams": {
+                "label_task": str(task_spec.name),
                 "lr": float(lr),
                 "weight_decay": float(weight_decay),
                 "label_smoothing": float(label_smoothing),
@@ -701,6 +794,11 @@ def main(
         ckpt = {
             "epoch": epoch,
             "task": "dual",
+            "label_task": str(task_spec.name),
+            "task_kind": str(task_spec.kind),
+            "class_id_to_name": {int(k): str(v) for k, v in class_id_to_name.items()},
+            "pos_codes": tuple(int(x) for x in getattr(task_spec, "pos_codes", ()) or ()),
+            "neg_codes": tuple(int(x) for x in getattr(task_spec, "neg_codes", ()) or ()),
             "model_name": spec.name,
             "model_kwargs": spec.kwargs,
             "num_classes": num_classes,

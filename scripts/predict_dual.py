@@ -11,6 +11,7 @@ from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.dual_dataset import EarCTDualDataset
 from medical_fenlei.models.dual_factory import make_dual_model
 from medical_fenlei.paths import infer_dicom_root
+from medical_fenlei.tasks import resolve_task
 
 app = typer.Typer(add_completion=False)
 
@@ -25,12 +26,32 @@ def _strip_compile_prefix(state_dict: dict) -> dict:
     return state_dict
 
 
+def _apply_binary_task(
+    labels: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    pos_label_ids: tuple[int, ...],
+    neg_label_ids: tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    pos_m = torch.zeros_like(mask, dtype=torch.bool)
+    for v in pos_label_ids:
+        pos_m |= labels == int(v)
+    neg_m = torch.zeros_like(mask, dtype=torch.bool)
+    for v in neg_label_ids:
+        neg_m |= labels == int(v)
+    keep = mask.bool() & (pos_m | neg_m)
+    out = torch.zeros_like(labels)
+    out[pos_m] = 1
+    return out, keep
+
+
 @app.command()
 def main(
     checkpoint: Path = typer.Option(..., exists=True, help="outputs/.../checkpoints/best.pt 或 last.pt"),
     index_csv: Path = typer.Option(..., exists=True, help="artifacts/splits_dual/*pct/val.csv 或自定义索引"),
     dicom_base: Path = typer.Option(Path("data/medical_data_2")),
     out_csv: Path = typer.Option(Path("artifacts/predictions_dual.csv")),
+    label_task: str | None = typer.Option(None, help="默认从 checkpoint 读取（没有则按 six_class）"),
     batch_size: int = typer.Option(1),
     num_workers: int = typer.Option(4),
     num_slices: int | None = typer.Option(None, help="默认从 checkpoint 读取"),
@@ -53,6 +74,19 @@ def main(
         num_slices = int(ckpt.get("num_slices", 32))
     if image_size is None:
         image_size = int(ckpt.get("image_size", 224))
+
+    inferred_task = label_task or ckpt.get("label_task")
+    if inferred_task is None:
+        inferred_task = "six_class"
+    task_spec = resolve_task(str(inferred_task))
+    if int(task_spec.num_classes) != int(num_classes):
+        typer.echo(f"warning: task={task_spec.name} expects num_classes={task_spec.num_classes} but ckpt has {num_classes}")
+
+    raw_names = ckpt.get("class_id_to_name")
+    if isinstance(raw_names, dict) and raw_names:
+        class_id_to_name = {int(k): str(v) for k, v in raw_names.items()}
+    else:
+        class_id_to_name = dict(task_spec.class_id_to_name)
 
     used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}"
     if not cache:
@@ -96,8 +130,23 @@ def main(
     with torch.no_grad():
         for batch in loader:
             x = batch["image"].to(device, non_blocking=True)
-            y = batch["label"].cpu().numpy()  # (B,2)
-            m = batch["label_mask"].cpu().numpy().astype(bool)
+            y = batch["label"]  # (B,2) on CPU
+            m = batch["label_mask"]
+            y_orig = y.clone()
+            m_orig = m.clone()
+
+            if task_spec.kind == "binary":
+                y, m = _apply_binary_task(
+                    y,
+                    m,
+                    pos_label_ids=task_spec.pos_label_ids(),
+                    neg_label_ids=task_spec.neg_label_ids(),
+                )
+
+            y_np = y.cpu().numpy()
+            m_np = m.cpu().numpy().astype(bool)
+            y_orig_np = y_orig.cpu().numpy()
+            m_orig_np = m_orig.cpu().numpy().astype(bool)
 
             logits = model(x)  # (B,2,C)
             probs = torch.softmax(logits, dim=-1).cpu().numpy()
@@ -108,27 +157,37 @@ def main(
             dates = meta["date"]
             series_relpaths = meta["series_relpath"]
 
-            for exam_id, date, series_relpath, gt, mask, pr, pb in zip(exam_ids, dates, series_relpaths, y, m, pred, probs):
+            for exam_id, date, series_relpath, gt, mask, gt0, mask0, pr, pb in zip(
+                exam_ids, dates, series_relpaths, y_np, m_np, y_orig_np, m_orig_np, pred, probs
+            ):
                 left_gt, right_gt = int(gt[0]), int(gt[1])
                 left_pr, right_pr = int(pr[0]), int(pr[1])
+                left_gt0, right_gt0 = int(gt0[0]), int(gt0[1])
 
                 rows.append(
                     {
                         "exam_id": int(exam_id),
                         "date": str(date),
                         "series_relpath": str(series_relpath),
+                        "label_task": str(task_spec.name),
                         "left_present": bool(mask[0]),
                         "right_present": bool(mask[1]),
                         "left_label": left_gt,
                         "right_label": right_gt,
-                        "left_label_name": CLASS_ID_TO_NAME.get(left_gt) if mask[0] else None,
-                        "right_label_name": CLASS_ID_TO_NAME.get(right_gt) if mask[1] else None,
+                        "left_label_name": class_id_to_name.get(left_gt) if mask[0] else None,
+                        "right_label_name": class_id_to_name.get(right_gt) if mask[1] else None,
+                        "left_label_orig": left_gt0,
+                        "right_label_orig": right_gt0,
+                        "left_label_orig_name": CLASS_ID_TO_NAME.get(left_gt0) if mask0[0] else None,
+                        "right_label_orig_name": CLASS_ID_TO_NAME.get(right_gt0) if mask0[1] else None,
                         "left_pred": left_pr,
                         "right_pred": right_pr,
-                        "left_pred_name": CLASS_ID_TO_NAME.get(left_pr),
-                        "right_pred_name": CLASS_ID_TO_NAME.get(right_pr),
+                        "left_pred_name": class_id_to_name.get(left_pr),
+                        "right_pred_name": class_id_to_name.get(right_pr),
                         "left_pred_prob": float(pb[0, left_pr]),
                         "right_pred_prob": float(pb[1, right_pr]),
+                        "left_pos_prob": float(pb[0, 1]) if pb.shape[-1] == 2 else None,
+                        "right_pos_prob": float(pb[1, 1]) if pb.shape[-1] == 2 else None,
                     }
                 )
 

@@ -16,6 +16,7 @@ app = typer.Typer(add_completion=False)
 class RunSummary:
     run_dir: str
     model: str
+    label_task: str
     pct: int
     epochs_ran: int
     batch_size: int | None
@@ -32,13 +33,16 @@ class RunSummary:
 _PCT_RE = re.compile(r"_(?P<pct>\d+)pct_")
 
 
-def _parse_run_name(name: str) -> tuple[str, int] | None:
+def _parse_run_name(name: str) -> tuple[str, str | None, int] | None:
     m = _PCT_RE.search(name)
     if not m:
         return None
     pct = int(m.group("pct"))
-    model = name[: m.start()]
-    return model, pct
+    prefix = name[: m.start()]
+    if "__" in prefix:
+        model, label_task = prefix.split("__", 1)
+        return str(model), str(label_task), pct
+    return str(prefix), None, pct
 
 
 def _iter_metrics(path: Path) -> list[dict[str, Any]]:
@@ -69,13 +73,14 @@ def _get_metric(rec: dict[str, Any], key: str) -> float | None:
 
 def _summarize_run(run_dir: Path, *, metric: str) -> RunSummary:
     parsed = _parse_run_name(run_dir.name)
-    model, pct = (parsed if parsed is not None else (run_dir.name, -1))
+    model, parsed_task, pct = (parsed if parsed is not None else (run_dir.name, None, -1))
 
     metrics_path = run_dir / "metrics.jsonl"
     if not metrics_path.exists():
         return RunSummary(
             run_dir=str(run_dir),
             model=str(model),
+            label_task=str(parsed_task or "six_class"),
             pct=int(pct),
             epochs_ran=0,
             batch_size=None,
@@ -95,6 +100,7 @@ def _summarize_run(run_dir: Path, *, metric: str) -> RunSummary:
         return RunSummary(
             run_dir=str(run_dir),
             model=str(model),
+            label_task=str(parsed_task or "six_class"),
             pct=int(pct),
             epochs_ran=0,
             batch_size=None,
@@ -112,6 +118,7 @@ def _summarize_run(run_dir: Path, *, metric: str) -> RunSummary:
         return RunSummary(
             run_dir=str(run_dir),
             model=str(model),
+            label_task=str(parsed_task or "six_class"),
             pct=int(pct),
             epochs_ran=0,
             batch_size=None,
@@ -133,6 +140,7 @@ def _summarize_run(run_dir: Path, *, metric: str) -> RunSummary:
     best_macro_spec = None
     best_weighted_f1 = None
     batch_size = None
+    label_task = str(parsed_task or "six_class")
 
     if metric == "val_loss":
         best_cmp = float("inf")
@@ -142,6 +150,14 @@ def _summarize_run(run_dir: Path, *, metric: str) -> RunSummary:
         better = lambda v, b: v > b
 
     for rec in recs:
+        if label_task == "six_class":
+            try:
+                v = (rec.get("hparams") or {}).get("label_task")
+                if v:
+                    label_task = str(v)
+            except Exception:
+                pass
+
         if batch_size is None:
             try:
                 batch_size = int(rec.get("batch_size"))
@@ -173,6 +189,7 @@ def _summarize_run(run_dir: Path, *, metric: str) -> RunSummary:
     return RunSummary(
         run_dir=str(run_dir),
         model=str(model),
+        label_task=str(label_task),
         pct=int(pct),
         epochs_ran=int(len(recs)),
         batch_size=batch_size,
@@ -195,6 +212,7 @@ def _write_csv(rows: list[RunSummary], path: Path) -> None:
             [
                 "pct",
                 "model",
+                "label_task",
                 "status",
                 "epochs_ran",
                 "batch_size",
@@ -213,6 +231,7 @@ def _write_csv(rows: list[RunSummary], path: Path) -> None:
                 [
                     r.pct,
                     r.model,
+                    r.label_task,
                     r.status,
                     r.epochs_ran,
                     r.batch_size,
@@ -237,9 +256,9 @@ def _fmt(v: float | None, *, digits: int = 4) -> str:
 def _write_markdown(rows: list[RunSummary], path: Path, *, metric: str, topk: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    by_pct: dict[int, list[RunSummary]] = {}
+    by_task: dict[str, dict[int, list[RunSummary]]] = {}
     for r in rows:
-        by_pct.setdefault(int(r.pct), []).append(r)
+        by_task.setdefault(str(r.label_task), {}).setdefault(int(r.pct), []).append(r)
 
     def sort_key(r: RunSummary) -> tuple[int, float]:
         is_ok = 1 if r.status == "ok" else 0
@@ -257,34 +276,36 @@ def _write_markdown(rows: list[RunSummary], path: Path, *, metric: str, topk: in
     lines.append(f"- metric: `{metric}`\n")
     lines.append("- note: `outputs/` is gitignored; this file summarizes local runs.\n")
 
-    for pct in sorted(by_pct.keys()):
-        if pct < 0:
-            continue
-        lines.append(f"\n## {pct}%\n")
-        runs = sorted(by_pct[pct], key=sort_key, reverse=True)[: int(topk)]
-        lines.append("| model | status | best_epoch | best_metric | val_loss | acc | macro_recall | macro_spec | weighted_f1 | batch | run_dir |")
-        lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
-        for r in runs:
-            lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        r.model,
-                        r.status,
-                        str(r.best_epoch) if r.best_epoch is not None else "-",
-                        _fmt(r.best_metric),
-                        _fmt(r.best_val_loss),
-                        _fmt(r.best_accuracy),
-                        _fmt(r.best_macro_recall),
-                        _fmt(r.best_macro_specificity),
-                        _fmt(r.best_weighted_f1),
-                        str(r.batch_size) if r.batch_size is not None else "-",
-                        f"`{Path(r.run_dir)}`",
-                    ]
+    for task in sorted(by_task.keys()):
+        lines.append(f"\n## task: `{task}`\n")
+        for pct in sorted(by_task[task].keys()):
+            if pct < 0:
+                continue
+            lines.append(f"\n### {pct}%\n")
+            runs = sorted(by_task[task][pct], key=sort_key, reverse=True)[: int(topk)]
+            lines.append("| model | status | best_epoch | best_metric | val_loss | acc | macro_recall | macro_spec | weighted_f1 | batch | run_dir |")
+            lines.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+            for r in runs:
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        [
+                            r.model,
+                            r.status,
+                            str(r.best_epoch) if r.best_epoch is not None else "-",
+                            _fmt(r.best_metric),
+                            _fmt(r.best_val_loss),
+                            _fmt(r.best_accuracy),
+                            _fmt(r.best_macro_recall),
+                            _fmt(r.best_macro_specificity),
+                            _fmt(r.best_weighted_f1),
+                            str(r.batch_size) if r.batch_size is not None else "-",
+                            f"`{Path(r.run_dir)}`",
+                        ]
+                    )
+                    + " |"
                 )
-                + " |"
-            )
-        lines.append("")
+            lines.append("")
 
     path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
@@ -316,9 +337,9 @@ def main(
         return float(r.best_metric)
 
     if metric == "val_loss":
-        rows_sorted = sorted(rows, key=lambda r: (r.pct, metric_sort(r), r.model))
+        rows_sorted = sorted(rows, key=lambda r: (r.label_task, r.pct, metric_sort(r), r.model))
     else:
-        rows_sorted = sorted(rows, key=lambda r: (r.pct, -metric_sort(r), r.model))
+        rows_sorted = sorted(rows, key=lambda r: (r.label_task, r.pct, -metric_sort(r), r.model))
 
     _write_csv(rows_sorted, Path(out_csv))
     _write_markdown(rows_sorted, Path(out_md), metric=str(metric), topk=int(topk))

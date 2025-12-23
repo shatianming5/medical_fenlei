@@ -31,9 +31,33 @@
 
 数据是 CT 体数据（3D），但体数据训练开销大；因此建议从轻到重：
 
-`dual_resnet10_3d`（推荐默认）
-- 做法：把左右耳分别裁剪成 (C=1, D=K, H, W) 体数据，用 **同一个** MONAI 3D ResNet10 分别前向（batch 维度拼接），输出 (left,right) 两个 logits
-- 优点：符合 3D CT 数据形态，且天然对齐“左右耳各自诊断”的标注方式
-- 入口：`scripts/train_dual.py`
+### 1) ResNet（推荐从这里开始）
+
+支持：`dual_resnet10_3d` / `dual_resnet18_3d` / `dual_resnet34_3d` / `dual_resnet50_3d` / `dual_resnet101_3d` / `dual_resnet152_3d` / `dual_resnet200_3d`
+
+- 做法：左右耳分别裁剪成 (C=1, D=K, H, W) 体数据，用同一个 MONAI 3D ResNet 前向（batch 维度拼接），输出 (left,right) 两个 logits
+- 优点：速度/效果均衡，适合从小到大逐步榨干显存
+
+### 2) UNet（当作“超重”特征提取器）
+
+模型：`dual_unet_3d`
+
+- 做法：用 MONAI 3D UNet 得到 (C=num_classes) 的体素 logits，再做全局平均得到分类 logits
+- 说明：对显存需求更高；要求 `num_slices` 和 `image_size` 能被 `prod(strides)` 整除（默认 strides=2,2,2,2 -> 要求能被 16 整除）
+
+### 3) ViT（Transformer）
+
+模型：`dual_vit_3d`
+
+- 做法：MONAI ViT（3D patch embedding）做分类头
+- 说明：依赖 `einops`（已加入 `environment.yml`）；要求 `img_size` 能被 `patch_size` 整除（默认 patch=4,16,16）
+
+训练入口：`scripts/train_dual.py --model <name>`
 
 说明：仓库仍保留单耳样本的 `scripts/train_side.py`/`scripts/predict_side.py` 作为对照/回退，但默认以双输出为主。
+
+## 指标（敏感度/Recall 等）
+
+训练时会在每个 epoch 评估验证集，并输出：
+- `outputs/<run>/metrics.jsonl`：每个 epoch 的 loss/acc + `macro_recall`(=敏感度)/`macro_specificity`/`macro_f1` 等
+- `outputs/<run>/reports/epoch_<n>.json`：完整明细（每类 precision/recall/specificity/F1 + confusion matrix）

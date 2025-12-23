@@ -37,9 +37,9 @@ python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out
 3) 一次检查 -> 左/右双输出 6 分类训练（MONAI 3D ResNet10；输出到 `outputs/`，不入库）：
 
 ```bash
-python scripts/train_dual.py --pct 1
-python scripts/train_dual.py --pct 20
-python scripts/train_dual.py --pct 100
+python scripts/train_dual.py --pct 1   --model dual_resnet10_3d
+python scripts/train_dual.py --pct 20  --model dual_resnet50_3d --auto-batch
+python scripts/train_dual.py --pct 100 --model dual_vit_3d --auto-batch
 ```
 
 4) 推理（输出到 `artifacts/`，不入库）：

@@ -79,6 +79,37 @@ def _primary_label(df: pd.DataFrame) -> pd.Series:
     return df.apply(_p, axis=1)
 
 
+def _patient_primary_label(exams: pd.DataFrame) -> int:
+    side_df = _expand_side_rows(exams)
+    if side_df.empty:
+        return -1
+    vc = side_df["label"].value_counts()
+    try:
+        return int(vc.index[0])
+    except Exception:
+        return -1
+
+
+def _attach_patient_key(
+    df: pd.DataFrame,
+    *,
+    manifest_csv: Path,
+    patient_key_col: str,
+) -> pd.DataFrame:
+    man = pd.read_csv(manifest_csv, usecols=["exam_id", patient_key_col])
+    man[patient_key_col] = man[patient_key_col].fillna("").astype(str)
+    man = man[man[patient_key_col].str.len() > 0].copy()
+    exam_to_patient = man.groupby("exam_id")[patient_key_col].first().to_dict()
+
+    out = df.copy()
+    out["patient_key"] = out["exam_id"].astype(int).map(lambda x: exam_to_patient.get(int(x), ""))
+    out["patient_key"] = out["patient_key"].fillna("").astype(str)
+    # fallback: use exam_id as unique key when patient key missing
+    m = out["patient_key"].str.len() <= 0
+    out.loc[m, "patient_key"] = out.loc[m, "exam_id"].astype(int).map(lambda x: f"EXAM_{int(x)}")
+    return out
+
+
 def _select_balanced_exams(
     train_exam_df: pd.DataFrame,
     *,
@@ -157,6 +188,12 @@ def main(
     ratios: str = typer.Option("0.01,0.2,1.0", help="训练集抽样比例（逗号分隔）"),
     seed: int = typer.Option(42),
     min_per_class: int = typer.Option(1, help="每类最少保留样本数（按耳朵计）"),
+    manifest_csv: Path | None = typer.Option(
+        None,
+        help="可选：耳朵级 manifest（由 scripts/build_manifest_ears.py 生成），用于 patient-level split",
+    ),
+    patient_key_col: str = typer.Option("patient_key_hash", help="manifest 中的 patient key 列名（建议 hash）"),
+    patient_split: bool = typer.Option(False, "--patient-split/--no-patient-split", help="按 patient_key 切分 train/val，避免同一病人跨集合"),
 ) -> None:
     df = pd.read_csv(index_csv)
     if df.empty:
@@ -170,24 +207,58 @@ def main(
         typer.echo("no labeled exams found (left_code/right_code are all empty)")
         raise typer.Exit(code=2)
 
-    key = _stratify_key(df)
-    try:
-        train_df, val_df = train_test_split(
-            df,
-            test_size=val_ratio,
-            random_state=seed,
-            shuffle=True,
-            stratify=key,
-        )
-    except ValueError:
-        # fallback: stratify by a single label to avoid sparse pair classes
-        train_df, val_df = train_test_split(
-            df,
-            test_size=val_ratio,
-            random_state=seed,
-            shuffle=True,
-            stratify=_primary_label(df),
-        )
+    if patient_split and manifest_csv is not None:
+        df2 = _attach_patient_key(df, manifest_csv=Path(manifest_csv), patient_key_col=str(patient_key_col))
+
+        # patient-level table
+        patient_rows: list[dict] = []
+        for pk, g in df2.groupby("patient_key"):
+            patient_rows.append({"patient_key": str(pk), "primary_label": _patient_primary_label(g), "n_exams": int(len(g))})
+        p_df = pd.DataFrame(patient_rows)
+        if p_df.empty:
+            raise typer.Exit(code=2)
+
+        try:
+            train_p, val_p = train_test_split(
+                p_df,
+                test_size=val_ratio,
+                random_state=seed,
+                shuffle=True,
+                stratify=p_df["primary_label"],
+            )
+        except ValueError:
+            train_p, val_p = train_test_split(
+                p_df,
+                test_size=val_ratio,
+                random_state=seed,
+                shuffle=True,
+                stratify=None,
+            )
+
+        train_keys = set(train_p["patient_key"].astype(str).tolist())
+        val_keys = set(val_p["patient_key"].astype(str).tolist())
+        train_df = df2[df2["patient_key"].astype(str).isin(train_keys)].reset_index(drop=True)
+        val_df = df2[df2["patient_key"].astype(str).isin(val_keys)].reset_index(drop=True)
+        typer.echo(f"patient_split: patients train={len(train_keys)} val={len(val_keys)}")
+    else:
+        key = _stratify_key(df)
+        try:
+            train_df, val_df = train_test_split(
+                df,
+                test_size=val_ratio,
+                random_state=seed,
+                shuffle=True,
+                stratify=key,
+            )
+        except ValueError:
+            # fallback: stratify by a single label to avoid sparse pair classes
+            train_df, val_df = train_test_split(
+                df,
+                test_size=val_ratio,
+                random_state=seed,
+                shuffle=True,
+                stratify=_primary_label(df),
+            )
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -212,4 +283,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

@@ -167,6 +167,77 @@ def _is_cuda_oom(e: BaseException) -> bool:
     return "out of memory" in msg or ("cuda" in msg and "oom" in msg)
 
 
+def _rand_uniform(shape: tuple[int, ...], *, device: torch.device, low: float, high: float, dtype: torch.dtype) -> torch.Tensor:
+    if high < low:
+        low, high = high, low
+    return (low + (high - low) * torch.rand(shape, device=device, dtype=dtype)).to(dtype)
+
+
+def _augment_batch(
+    x: torch.Tensor,
+    *,
+    flip_prob: float,
+    intensity_prob: float,
+    noise_prob: float,
+    gamma_prob: float,
+) -> torch.Tensor:
+    # x: (B,2,1,D,H,W) in [0,1]
+    if x.ndim != 6:
+        return x
+    if max(flip_prob, intensity_prob, noise_prob, gamma_prob) <= 0:
+        return x
+
+    b = int(x.shape[0])
+    s = int(x.shape[1])
+    n = b * s
+    x2 = x.reshape(n, *x.shape[2:]).contiguous()  # (N,1,D,H,W)
+
+    orig_dtype = x2.dtype
+    if orig_dtype in (torch.float16, torch.bfloat16):
+        x2 = x2.float()
+
+    device = x2.device
+
+    # Random flips (per sample) on H/W.
+    if flip_prob > 0:
+        do_h = torch.rand((n,), device=device) < float(flip_prob)
+        do_w = torch.rand((n,), device=device) < float(flip_prob)
+        if do_h.any():
+            x2[do_h] = x2[do_h].flip(-2)
+        if do_w.any():
+            x2[do_w] = x2[do_w].flip(-1)
+
+    # Random intensity scale/shift.
+    if intensity_prob > 0:
+        do_i = torch.rand((n,), device=device) < float(intensity_prob)
+        if do_i.any():
+            scale = _rand_uniform((int(do_i.sum()), 1, 1, 1, 1), device=device, low=0.90, high=1.10, dtype=x2.dtype)
+            shift = _rand_uniform((int(do_i.sum()), 1, 1, 1, 1), device=device, low=-0.10, high=0.10, dtype=x2.dtype)
+            x2_do = x2[do_i]
+            x2_do = x2_do * scale + shift
+            x2[do_i] = x2_do
+
+    # Random gamma.
+    if gamma_prob > 0:
+        do_g = torch.rand((n,), device=device) < float(gamma_prob)
+        if do_g.any():
+            gamma = _rand_uniform((int(do_g.sum()), 1, 1, 1, 1), device=device, low=0.70, high=1.50, dtype=x2.dtype)
+            x2_do = x2[do_g].clamp(min=1e-6, max=1.0)
+            x2[do_g] = x2_do**gamma
+
+    # Random gaussian noise.
+    if noise_prob > 0:
+        do_n = torch.rand((n,), device=device) < float(noise_prob)
+        if do_n.any():
+            std = _rand_uniform((int(do_n.sum()), 1, 1, 1, 1), device=device, low=0.0, high=0.03, dtype=x2.dtype)
+            x2[do_n] = x2[do_n] + torch.randn_like(x2[do_n]) * std
+
+    x2 = x2.clamp(0.0, 1.0)
+    if x2.dtype != orig_dtype:
+        x2 = x2.to(orig_dtype)
+    return x2.reshape(b, s, *x.shape[2:]).contiguous()
+
+
 def _run_epoch(
     *,
     model: torch.nn.Module,
@@ -176,6 +247,11 @@ def _run_epoch(
     optimizer: torch.optim.Optimizer | None,
     scaler: torch.cuda.amp.GradScaler | None,
     amp: bool,
+    augment: bool = False,
+    aug_flip_prob: float = 0.0,
+    aug_intensity_prob: float = 0.0,
+    aug_noise_prob: float = 0.0,
+    aug_gamma_prob: float = 0.0,
     num_classes: int | None = None,
     collect_cm: bool = False,
 ) -> dict:
@@ -207,6 +283,15 @@ def _run_epoch(
             x = batch["image"].to(device, non_blocking=True)
             y = batch["label"].to(device, non_blocking=True)
             m = batch["label_mask"].to(device, non_blocking=True)
+
+            if is_train and augment:
+                x = _augment_batch(
+                    x,
+                    flip_prob=float(aug_flip_prob),
+                    intensity_prob=float(aug_intensity_prob),
+                    noise_prob=float(aug_noise_prob),
+                    gamma_prob=float(aug_gamma_prob),
+                )
 
             amp_enabled = amp and device.type == "cuda"
             if amp_enabled:
@@ -313,7 +398,14 @@ def main(
     unet_strides: str = typer.Option("2,2,2,2", help="仅 dual_unet_3d 生效"),
     unet_num_res_units: int = typer.Option(2, help="仅 dual_unet_3d 生效"),
     lr: float = typer.Option(1e-4),
+    weight_decay: float = typer.Option(0.05, help="AdamW weight decay（更强正则，默认比 PyTorch 的 0.01 更大）"),
     seed: int = typer.Option(42),
+    label_smoothing: float = typer.Option(0.10, help="CrossEntropy label smoothing（更强正则）"),
+    augment: bool = typer.Option(True, "--augment/--no-augment", help="训练时启用数据增强（不会写入 cache）"),
+    aug_flip_prob: float = typer.Option(0.5, help="随机翻转概率（H/W）"),
+    aug_intensity_prob: float = typer.Option(0.7, help="随机强度缩放/平移概率"),
+    aug_noise_prob: float = typer.Option(0.2, help="随机高斯噪声概率"),
+    aug_gamma_prob: float = typer.Option(0.2, help="随机 gamma 概率"),
     amp: bool = typer.Option(True),
     tf32: bool = typer.Option(True, help="CUDA: 允许 TF32 加速 matmul/conv"),
     cudnn_benchmark: bool = typer.Option(True, help="CUDA: cudnn benchmark 以提高吞吐"),
@@ -434,8 +526,12 @@ def main(
             persistent_workers=num_workers > 0,
         )
 
-    optimizer = torch.optim.AdamW(net.parameters(), lr=lr)
-    loss_fn = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr, weight_decay=float(weight_decay))
+    try:
+        loss_fn = torch.nn.CrossEntropyLoss(label_smoothing=float(label_smoothing))
+    except TypeError:
+        # Older torch may not support label_smoothing.
+        loss_fn = torch.nn.CrossEntropyLoss()
 
     amp_enabled = amp and device.type == "cuda"
     if not amp_enabled:
@@ -455,7 +551,10 @@ def main(
     log_path = out / "metrics.jsonl"
 
     typer.echo(f"task: 一次检查 -> 左/右双输出 6 分类  classes={num_classes}")
-    typer.echo(f"model: {model}  pct={pct}%  batch_size={batch_size}  amp={amp}")
+    typer.echo(
+        f"model: {model}  pct={pct}%  batch_size={batch_size}  amp={amp}  "
+        f"wd={float(weight_decay)}  ls={float(label_smoothing)}  augment={bool(augment)}"
+    )
     typer.echo(f"dicom_root: {dicom_root}")
     if used_cache_dir is not None:
         typer.echo(f"cache_dir: {used_cache_dir} ({cache_dtype})")
@@ -500,6 +599,11 @@ def main(
                     optimizer=optimizer,
                     scaler=scaler,
                     amp=amp,
+                    augment=bool(augment),
+                    aug_flip_prob=float(aug_flip_prob),
+                    aug_intensity_prob=float(aug_intensity_prob),
+                    aug_noise_prob=float(aug_noise_prob),
+                    aug_gamma_prob=float(aug_gamma_prob),
                 )
                 break
             except RuntimeError as e:
@@ -529,6 +633,7 @@ def main(
                     optimizer=None,
                     scaler=None,
                     amp=amp,
+                    augment=False,
                     num_classes=num_classes,
                     collect_cm=True,
                 )
@@ -568,6 +673,16 @@ def main(
             "val": val_m,
             "val_metrics": {k: report[k] for k in ("accuracy", "macro_recall", "macro_specificity", "macro_f1", "weighted_f1", "total")},
             "model": {"name": spec.name, "kwargs": spec.kwargs},
+            "hparams": {
+                "lr": float(lr),
+                "weight_decay": float(weight_decay),
+                "label_smoothing": float(label_smoothing),
+                "augment": bool(augment),
+                "aug_flip_prob": float(aug_flip_prob),
+                "aug_intensity_prob": float(aug_intensity_prob),
+                "aug_noise_prob": float(aug_noise_prob),
+                "aug_gamma_prob": float(aug_gamma_prob),
+            },
             "batch_size": int(batch_size),
             "early_stop": {"metric": early_stop_metric, "mode": metric_mode, "score": score, "patience": int(early_stop_patience), "min_delta": float(early_stop_min_delta)},
         }
@@ -592,6 +707,14 @@ def main(
             "num_slices": num_slices,
             "image_size": image_size,
             "batch_size": int(batch_size),
+            "lr": float(lr),
+            "weight_decay": float(weight_decay),
+            "label_smoothing": float(label_smoothing),
+            "augment": bool(augment),
+            "aug_flip_prob": float(aug_flip_prob),
+            "aug_intensity_prob": float(aug_intensity_prob),
+            "aug_noise_prob": float(aug_noise_prob),
+            "aug_gamma_prob": float(aug_gamma_prob),
             "state_dict": net.state_dict(),
             "val_loss": val_m["loss"],
             "early_stop_metric": early_stop_metric,

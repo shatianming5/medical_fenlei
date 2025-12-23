@@ -50,9 +50,16 @@ def main(
     epochs_1pct: int = typer.Option(200, help="1% 的 max epochs（配合 early-stop；默认偏多，因为每 epoch steps 很少）"),
     epochs_20pct: int = typer.Option(80, help="20% 的 max epochs（配合 early-stop）"),
     epochs_100pct: int = typer.Option(40, help="100% 的 max epochs（配合 early-stop；默认偏少，因为每 epoch steps 很多）"),
-    early_stop_patience: int = typer.Option(10, help="早停 patience（0=关闭）"),
+    early_stop_patience: int = typer.Option(5, help="早停 patience（0=关闭；默认更小以减少过拟合）"),
     early_stop_metric: str = typer.Option("macro_f1", help="val_loss | macro_f1 | macro_recall | macro_specificity | weighted_f1"),
     early_stop_min_delta: float = typer.Option(0.001, help="最小提升幅度"),
+    weight_decay: float = typer.Option(0.05, help="AdamW weight decay（更强正则）"),
+    label_smoothing: float = typer.Option(0.10, help="CrossEntropy label smoothing（更强正则）"),
+    augment: bool = typer.Option(True, "--augment/--no-augment", help="训练时启用数据增强"),
+    aug_flip_prob: float = typer.Option(0.5),
+    aug_intensity_prob: float = typer.Option(0.7),
+    aug_noise_prob: float = typer.Option(0.2),
+    aug_gamma_prob: float = typer.Option(0.2),
     dry_run: bool = typer.Option(False, help="只打印命令不执行"),
 ) -> None:
     pct_list = _parse_int_list(pcts)
@@ -103,6 +110,18 @@ def main(
                 str(early_stop_metric),
                 "--early-stop-min-delta",
                 str(float(early_stop_min_delta)),
+                "--weight-decay",
+                str(float(weight_decay)),
+                "--label-smoothing",
+                str(float(label_smoothing)),
+                "--aug-flip-prob",
+                str(float(aug_flip_prob)),
+                "--aug-intensity-prob",
+                str(float(aug_intensity_prob)),
+                "--aug-noise-prob",
+                str(float(aug_noise_prob)),
+                "--aug-gamma-prob",
+                str(float(aug_gamma_prob)),
             ]
 
             if amp:
@@ -117,6 +136,10 @@ def main(
                 cmd.append("--cache")
             else:
                 cmd.append("--no-cache")
+            if augment:
+                cmd.append("--augment")
+            else:
+                cmd.append("--no-augment")
 
             print("\n$ " + " ".join(cmd), flush=True)
             if dry_run:

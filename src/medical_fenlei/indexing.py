@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
 from pathlib import Path
 import re
 
@@ -37,13 +36,6 @@ def _pick_series_dir(exam_dir: Path) -> tuple[Path | None, int]:
     return best, max(best_n, 0)
 
 
-def _parse_iso_date(value: str) -> date | None:
-    try:
-        return date.fromisoformat(value)
-    except Exception:
-        return None
-
-
 def _build_exam_dir_lookup(dicom_root: Path) -> dict[int, list[Path]]:
     """
     Build a lookup from exam_id -> list[exam_dir] by scanning dicom_root/*/*.
@@ -70,26 +62,22 @@ def _build_exam_dir_lookup(dicom_root: Path) -> dict[int, list[Path]]:
     return dict(lookup)
 
 
-def _resolve_exam_dir(exam_dirs: list[Path], *, label_date: str | None) -> tuple[Path, bool]:
+def _resolve_exam_dir(exam_dirs: list[Path]) -> tuple[Path, bool]:
     if len(exam_dirs) == 1:
         return exam_dirs[0], False
 
-    if label_date:
-        for cand in exam_dirs:
-            if cand.parent.name == label_date:
-                return cand, False
-
-        label_dt = _parse_iso_date(label_date)
-        if label_dt is not None:
-            scored: list[tuple[int, Path]] = []
-            for cand in exam_dirs:
-                cand_dt = _parse_iso_date(cand.parent.name)
-                if cand_dt is None:
-                    continue
-                scored.append((abs((cand_dt - label_dt).days), cand))
-            if scored:
-                scored.sort(key=lambda x: x[0])
-                return scored[0][1], True
+    # When an exam_id appears under multiple dates, pick the one with the most
+    # DICOM instances in its best series. (We intentionally do NOT use label
+    # date; matching is by exam_id only.)
+    best_exam_dir = None
+    best_instances = -1
+    for cand in exam_dirs:
+        _, n_instances = _pick_series_dir(cand)
+        if n_instances > best_instances:
+            best_exam_dir = cand
+            best_instances = n_instances
+    if best_exam_dir is not None:
+        return best_exam_dir, True
 
     # Fallback: deterministic pick.
     return sorted(exam_dirs, key=lambda p: p.as_posix())[0], True
@@ -99,8 +87,12 @@ def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFra
     """
     Match labels to local DICOM folders and pick one Series folder per exam.
 
+    Matching strategy: by exam_id only (ignores label date for path selection).
+
     Output columns:
-      - exam_id, date
+      - exam_id
+      - date (folder date on disk)
+      - label_date (date from XLSX, may differ)
       - exam_relpath, series_relpath
       - n_instances
       - left_code, right_code
@@ -114,7 +106,7 @@ def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFra
         if not exam_dirs:
             continue
 
-        exam_dir, ambiguous = _resolve_exam_dir(exam_dirs, label_date=getattr(r, "date", None))
+        exam_dir, ambiguous = _resolve_exam_dir(exam_dirs)
 
         series_dir, n_instances = _pick_series_dir(exam_dir)
         if series_dir is None or n_instances <= 0:
@@ -125,7 +117,8 @@ def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFra
         rows.append(
             {
                 "exam_id": int(r.exam_id),
-                "date": label_date,
+                "date": folder_date,
+                "label_date": label_date,
                 "folder_date": folder_date,
                 "date_match": bool(label_date == folder_date) if label_date is not None else False,
                 "ambiguous_match": bool(ambiguous),

@@ -22,7 +22,7 @@ tail -f logs/extract_all.log
 
 环境安装见 `docs/SETUP.md`。
 
-1) 生成索引（会匹配 `metadata/*.xlsx` 的检查号/检查时间到本地 DICOM 目录）：
+1) 生成索引（仅按检查号 `exam_id` 匹配到本地 DICOM 目录；检查时间在该数据中大量不一致，仅作为 `label_date` 保留）：
 
 ```bash
 python scripts/build_index.py --out-csv artifacts/dataset_index.csv

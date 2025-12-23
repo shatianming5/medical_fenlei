@@ -83,4 +83,4 @@ python scripts/build_cache_dual.py --pct 100 --num-slices 32 --image-size 224 --
 python scripts/run_experiments_dual.py
 ```
 
-默认 epochs（可改）：1%/20%/100% 分别是 80/30/12（见 `scripts/run_experiments_dual.py`）。
+默认 max epochs（可改）：1%/20%/100% 分别是 200/80/40；并默认开启 early stopping（见 `scripts/run_experiments_dual.py` 和 `scripts/train_dual.py`）。

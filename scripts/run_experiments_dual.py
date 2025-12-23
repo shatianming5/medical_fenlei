@@ -46,9 +46,12 @@ def main(
     cache: bool = typer.Option(True),
     cache_dir: Path = typer.Option(Path("cache/dual_volumes")),
     cache_dtype: str = typer.Option("float16"),
-    epochs_1pct: int = typer.Option(80, help="1% 的 epochs（默认偏多，因为每 epoch steps 很少）"),
-    epochs_20pct: int = typer.Option(30, help="20% 的 epochs"),
-    epochs_100pct: int = typer.Option(12, help="100% 的 epochs（默认偏少，因为每 epoch steps 很多）"),
+    epochs_1pct: int = typer.Option(200, help="1% 的 max epochs（配合 early-stop；默认偏多，因为每 epoch steps 很少）"),
+    epochs_20pct: int = typer.Option(80, help="20% 的 max epochs（配合 early-stop）"),
+    epochs_100pct: int = typer.Option(40, help="100% 的 max epochs（配合 early-stop；默认偏少，因为每 epoch steps 很多）"),
+    early_stop_patience: int = typer.Option(10, help="早停 patience（0=关闭）"),
+    early_stop_metric: str = typer.Option("macro_f1", help="val_loss | macro_f1 | macro_recall | macro_specificity | weighted_f1"),
+    early_stop_min_delta: float = typer.Option(0.001, help="最小提升幅度"),
     dry_run: bool = typer.Option(False, help="只打印命令不执行"),
 ) -> None:
     pct_list = _parse_int_list(pcts)
@@ -89,6 +92,12 @@ def main(
                 str(cache_dir),
                 "--cache-dtype",
                 str(cache_dtype),
+                "--early-stop-patience",
+                str(int(early_stop_patience)),
+                "--early-stop-metric",
+                str(early_stop_metric),
+                "--early-stop-min-delta",
+                str(float(early_stop_min_delta)),
             ]
 
             if amp:
@@ -112,4 +121,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

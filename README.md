@@ -60,4 +60,6 @@ python scripts/predict_dual.py --checkpoint outputs/<run>/checkpoints/best.pt --
 python scripts/run_experiments_dual.py
 ```
 
+默认采用 “max epochs + early stopping” 避免手工猜 epoch；可用 `--dry-run` 先查看将执行的命令。
+
 更多说明见 `docs/TASK.md`。

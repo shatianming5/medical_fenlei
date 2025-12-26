@@ -564,6 +564,10 @@ def _run_epoch(
     loss_fn: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None,
     scaler: torch.cuda.amp.GradScaler | None,
+    wandb_run=None,
+    wandb_log_every_steps: int = 0,
+    wandb_step_base: int = 0,
+    epoch: int = 0,
     amp: bool,
     grad_accum_steps: int = 1,
     grad_clip_norm: float = 0.0,
@@ -613,6 +617,13 @@ def _run_epoch(
     total_left_pred_pos = 0
     total_right_pred_pos = 0
     n_batches = 0
+
+    wb = wandb_run
+    wb_every = int(wandb_log_every_steps)
+    if wb_every < 0:
+        wb_every = 0
+    wb_step0 = int(wandb_step_base)
+    epoch_i = int(epoch)
 
     cm = None
     if collect_cm:
@@ -912,6 +923,46 @@ def _run_epoch(
             total_right_pred_pos += int(metrics.get("right_pred_pos", 0))
             n_batches += 1
 
+            if bool(is_train) and wb is not None and wb_every > 0 and (n_batches == 1 or (n_batches % wb_every == 0)):
+                try:
+                    step = wb_step0 + int(n_batches)
+                    lr_now = float(_get_optimizer_lr(optimizer)) if optimizer is not None else None
+                    # Smooth running averages for quick feedback on W&B before epoch end.
+                    n_seen = int(total_n)
+                    loss_avg = float(total_loss / max(int(n_batches), 1))
+                    acc_avg = float(total_acc / max(n_seen, 1)) if n_seen > 0 else None
+                    left_acc_avg = float(total_left / max(int(total_left_n), 1)) if int(total_left_n) > 0 else None
+                    right_acc_avg = float(total_right / max(int(total_right_n), 1)) if int(total_right_n) > 0 else None
+
+                    ep_prog = None
+                    try:
+                        denom = int(len(loader))
+                        if denom > 0 and epoch_i > 0:
+                            ep_prog = float(epoch_i - 1) + float(n_batches) / float(denom)
+                    except Exception:
+                        ep_prog = None
+
+                    wandb_metrics = {
+                        "epoch": float(ep_prog) if ep_prog is not None else float(epoch_i),
+                        "lr": float(lr_now) if lr_now is not None else None,
+                        "train/loss": loss_avg,
+                        "train/acc": float(acc_avg) if acc_avg is not None else None,
+                        "train/left_acc": float(left_acc_avg) if left_acc_avg is not None else None,
+                        "train/right_acc": float(right_acc_avg) if right_acc_avg is not None else None,
+                        "train/vl_loss": float(total_vl_loss / max(vl_batches, 1)) if vl_batches > 0 else None,
+                        "train/vl_pairs": int(total_vl_pairs) if vl_batches > 0 else None,
+                        "train/vl_local_loss": float(total_vl_local_loss / max(vl_local_batches, 1)) if vl_local_batches > 0 else None,
+                        "train/vl_local_queries": int(total_vl_local_queries) if vl_local_batches > 0 else None,
+                        "train/bilat_loss": float(total_bilat_loss / max(bilat_batches, 1)) if bilat_batches > 0 else None,
+                        "train/bilat_normal_pairs": int(bilat_normal_pairs) if bilat_batches > 0 else None,
+                        "train/bilat_unilateral_pairs": int(bilat_unilateral_pairs) if bilat_batches > 0 else None,
+                    }
+                    wandb_metrics = {k: v for k, v in wandb_metrics.items() if v is not None}
+                    wb.log(wandb_metrics, step=int(step))
+                except Exception:
+                    # Avoid breaking training if W&B has transient issues.
+                    pass
+
             if cm is not None:
                 pred = logits.detach().argmax(dim=-1).cpu()
                 y_cpu = y.detach().cpu()
@@ -982,6 +1033,7 @@ def _run_epoch(
         )
     if cm is not None:
         out["confusion_matrix"] = cm
+    out["_batches"] = int(n_batches)
     return out
 
 
@@ -1121,6 +1173,7 @@ def main(
     wandb_tags: str = typer.Option("", help="逗号分隔 tags"),
     wandb_mode: str = typer.Option("online", help="online | offline | disabled"),
     wandb_dir: Path = typer.Option(Path("wandb"), help="wandb 本地目录（不入库）"),
+    wandb_log_every_steps: int = typer.Option(0, help="wandb: 每隔多少个 train batch 记录一次指标（0=仅每 epoch 记录）"),
     early_stop_patience: int = typer.Option(0, help="早停 patience（0=关闭）"),
     early_stop_metric: str = typer.Option("val_acc", help="val_acc | val_loss | macro_f1 | macro_recall | macro_specificity | weighted_f1"),
     early_stop_min_delta: float = typer.Option(0.0, help="最小提升幅度（避免抖动）"),
@@ -1631,7 +1684,7 @@ def main(
 
             wb = _wandb
             if str(wandb_mode).lower() == "online" and not os.environ.get("WANDB_API_KEY"):
-                typer.echo("wandb: WANDB_API_KEY 未设置；请先 export WANDB_API_KEY=...（或设置 WANDB_MODE=offline）")
+                typer.echo("wandb: WANDB_API_KEY 未设置（如已 wandb login 则无需；或设置 WANDB_MODE=offline）")
 
             name = str(wandb_name) if wandb_name else out.name
             tags = [t.strip() for t in str(wandb_tags).split(",") if t.strip()]
@@ -1689,6 +1742,10 @@ def main(
                         "label_smoothing": float(label_smoothing),
                         "eval_every": int(eval_every),
                     },
+                    "wandb": {
+                        "mode": str(wandb_mode).lower(),
+                        "log_every_steps": int(wandb_log_every_steps),
+                    },
                 },
             )
         except Exception as e:
@@ -1715,6 +1772,8 @@ def main(
         train_loader = _make_train_loader(int(bs))
         val_loader = _make_val_loader(int(bs))
 
+    wandb_step = 0
+
     for epoch in range(1, epochs + 1):
         epoch_lr = _compute_epoch_lr(
             epoch,
@@ -1737,6 +1796,10 @@ def main(
                     loss_fn=loss_fn,
                     optimizer=optimizer,
                     scaler=scaler,
+                    wandb_run=wb_run,
+                    wandb_log_every_steps=int(wandb_log_every_steps),
+                    wandb_step_base=int(wandb_step),
+                    epoch=int(epoch),
                     amp=amp,
                     grad_accum_steps=int(grad_accum_steps),
                     grad_clip_norm=float(grad_clip_norm),
@@ -1773,6 +1836,8 @@ def main(
                     continue
                 raise
 
+        wandb_step += int(train_m.get("_batches", 0) or 0)
+
         if empty_cache and device.type == "cuda":
             torch.cuda.empty_cache()
 
@@ -1792,6 +1857,10 @@ def main(
                         loss_fn=loss_fn,
                         optimizer=None,
                         scaler=None,
+                        wandb_run=None,
+                        wandb_log_every_steps=0,
+                        wandb_step_base=int(wandb_step),
+                        epoch=int(epoch),
                         amp=val_amp,
                         grad_accum_steps=1,
                         augment=False,
@@ -1939,7 +2008,8 @@ def main(
                     "val/accuracy": float(report["accuracy"]) if report is not None else None,
                 }
                 wandb_metrics = {k: v for k, v in wandb_metrics.items() if v is not None}
-                wb_run.log(wandb_metrics, step=int(epoch))
+                step = int(wandb_step) if int(wandb_log_every_steps) > 0 else int(epoch)
+                wb_run.log(wandb_metrics, step=int(step))
             except Exception:
                 pass
 

@@ -11,6 +11,7 @@ import typer
 from PIL import Image
 from torch.utils.data import DataLoader
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.data.ear_dataset import EarCTHUEarDataset, EarPreprocessSpec
 from medical_fenlei.models.slice_attention_resnet import SliceAttentionResNet
 from medical_fenlei.paths import infer_dicom_root
@@ -39,7 +40,7 @@ def main(
     splits_root: Path = typer.Option(Path("artifacts/splits_dual")),
     pct: int = typer.Option(20),
     manifest_csv: Path = typer.Option(Path("artifacts/manifest_ears.csv"), exists=True),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2")),
+    dicom_base: Path = typer.Option(default_dicom_base()),
     cache_dir: Path = typer.Option(Path("cache/ears_hu")),
     wl: float = typer.Option(500.0),
     ww: float = typer.Option(3000.0),
@@ -62,6 +63,12 @@ def main(
         crop_size=int(spec_d.get("crop_size", 192)),
         sampling=str(spec_d.get("sampling", "even")),
         block_len=int(spec_d.get("block_len", 64)),
+        crop_mode=str(spec_d.get("crop_mode", "temporal_patch")),
+        crop_lateral_band_frac=float(spec_d.get("crop_lateral_band_frac", 0.6) or 0.6),
+        crop_lateral_bias=float(spec_d.get("crop_lateral_bias", 0.25) or 0.25),
+        crop_min_area=int(spec_d.get("crop_min_area", 300) or 300),
+        target_spacing=float(spec_d.get("target_spacing")) if spec_d.get("target_spacing") not in (None, "", 0, 0.0) else None,
+        target_z_spacing=float(spec_d.get("target_z_spacing")) if spec_d.get("target_z_spacing") not in (None, "", 0, 0.0) else None,
         version=str(spec_d.get("version", "v1")),
     )
 
@@ -70,7 +77,9 @@ def main(
     model.load_state_dict(ckpt["state_dict"], strict=True)
 
     dicom_root = infer_dicom_root(dicom_base)
-    used_cache_dir = cache_dir / f"d{int(spec.num_slices)}_s{int(spec.image_size)}_c{int(spec.crop_size)}_{str(spec.sampling)}"
+    ts_tag = f"_ts{float(spec.target_spacing):.6g}" if spec.target_spacing is not None and float(spec.target_spacing) > 0 else ""
+    tz_tag = f"_tz{float(spec.target_z_spacing):.6g}" if spec.target_z_spacing is not None and float(spec.target_z_spacing) > 0 else ""
+    used_cache_dir = cache_dir / f"d{int(spec.num_slices)}_s{int(spec.image_size)}_c{int(spec.crop_size)}_{str(spec.sampling)}{ts_tag}{tz_tag}_crop{str(spec.crop_mode)}"
 
     # Locate the ear row in manifest.
     man = pd.read_csv(manifest_csv)

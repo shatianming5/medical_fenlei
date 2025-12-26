@@ -8,6 +8,90 @@ import numpy as np
 import pydicom
 
 
+def _pixel_spacing(ds: pydicom.Dataset) -> tuple[float | None, float | None]:
+    px = getattr(ds, "PixelSpacing", None)
+    if px is None:
+        return None, None
+    try:
+        if isinstance(px, (list, tuple)) and len(px) >= 2:
+            sy = float(px[0])
+            sx = float(px[1])
+            if sy <= 0 or sx <= 0:
+                return None, None
+            return sy, sx
+    except Exception:
+        return None, None
+    return None, None
+
+
+def _canonicalize_inplane_orientation_with_spacing(
+    img: np.ndarray, ds: pydicom.Dataset, *, spacing_y: float | None, spacing_x: float | None
+) -> tuple[np.ndarray, float | None, float | None]:
+    if img.ndim != 2:
+        return img, spacing_y, spacing_x
+
+    iop = getattr(ds, "ImageOrientationPatient", None)
+    if iop is None:
+        return img, spacing_y, spacing_x
+    try:
+        vals = [float(x) for x in list(iop)[:6]]
+    except Exception:
+        return img, spacing_y, spacing_x
+    if len(vals) < 6:
+        return img, spacing_y, spacing_x
+
+    x_dir = np.asarray(vals[:3], dtype=np.float64)
+    y_dir = np.asarray(vals[3:6], dtype=np.float64)
+
+    # Skip strongly oblique slices.
+    if abs(float(x_dir[2])) > 0.2 or abs(float(y_dir[2])) > 0.2:
+        return img, spacing_y, spacing_x
+
+    x2 = x_dir[:2]
+    y2 = y_dir[:2]
+    ax_x = int(np.argmax(np.abs(x2)))  # 0=patient X, 1=patient Y
+    ax_y = int(np.argmax(np.abs(y2)))
+    if ax_x == ax_y:
+        return img, spacing_y, spacing_x
+
+    out = img
+    transposed = False
+    if ax_x == 1 and ax_y == 0:
+        out = out.T
+        x2, y2 = y2, x2
+        ax_x, ax_y = ax_y, ax_x
+        transposed = True
+
+    if ax_x != 0 or ax_y != 1:
+        if transposed:
+            out = out.copy()
+        return out, (spacing_x if transposed else spacing_y), (spacing_y if transposed else spacing_x)
+
+    if float(x2[0]) < 0:
+        out = np.fliplr(out)
+    if float(y2[1]) < 0:
+        out = np.flipud(out)
+
+    if transposed:
+        spacing_y, spacing_x = spacing_x, spacing_y
+    return out.copy(), spacing_y, spacing_x
+
+
+def _canonicalize_inplane_orientation(img: np.ndarray, ds: pydicom.Dataset) -> np.ndarray:
+    """
+    Canonicalize in-plane orientation using ImageOrientationPatient (IOP).
+
+    Target (LPS):
+      - columns increase towards patient Left  (+X)
+      - rows    increase towards patient Posterior (+Y)
+
+    Handles pure flips and 90-degree rotations (transpose).
+    Falls back to the input when IOP is missing/unsupported.
+    """
+    out, _, _ = _canonicalize_inplane_orientation_with_spacing(img, ds, spacing_y=None, spacing_x=None)
+    return out
+
+
 def _last_numeric_token(path: Path) -> int:
     # Most files are named like "<SOPInstanceUID>.dcm", and the UID ends with a
     # numeric token that is monotonic per slice in this dataset.
@@ -86,6 +170,19 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except Exception:
         return None
+    return None
+
+
+def _ipp_z(ds: pydicom.Dataset) -> float | None:
+    ipp = getattr(ds, "ImagePositionPatient", None)
+    if ipp is None:
+        return None
+    try:
+        if isinstance(ipp, (list, tuple)) and len(ipp) >= 3:
+            return float(ipp[2])
+    except Exception:
+        return None
+    return None
 
 
 @dataclass(frozen=True)
@@ -122,7 +219,42 @@ def read_dicom_hu(path: Path) -> np.ndarray:
     img = dicom_to_hu(ds, pixels)
     if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
         img = img.max() - img
+    img = _canonicalize_inplane_orientation(img, ds)
     return img.astype(np.float32)
+
+
+def read_dicom_hu_and_z(path: Path) -> tuple[np.ndarray, float | None]:
+    ds = pydicom.dcmread(str(path), force=True)
+    z = _ipp_z(ds)
+    pixels = ds.pixel_array
+    img = dicom_to_hu(ds, pixels)
+    if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+        img = img.max() - img
+    img = _canonicalize_inplane_orientation(img, ds)
+    return img.astype(np.float32), z
+
+
+def read_dicom_hu_and_spacing(path: Path) -> tuple[np.ndarray, tuple[float | None, float | None]]:
+    ds = pydicom.dcmread(str(path), force=True)
+    spacing_y, spacing_x = _pixel_spacing(ds)
+    pixels = ds.pixel_array
+    img = dicom_to_hu(ds, pixels)
+    if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+        img = img.max() - img
+    img, spacing_y, spacing_x = _canonicalize_inplane_orientation_with_spacing(img, ds, spacing_y=spacing_y, spacing_x=spacing_x)
+    return img.astype(np.float32), (spacing_y, spacing_x)
+
+
+def read_dicom_hu_and_spacing_and_z(path: Path) -> tuple[np.ndarray, tuple[float | None, float | None], float | None]:
+    ds = pydicom.dcmread(str(path), force=True)
+    z = _ipp_z(ds)
+    spacing_y, spacing_x = _pixel_spacing(ds)
+    pixels = ds.pixel_array
+    img = dicom_to_hu(ds, pixels)
+    if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+        img = img.max() - img
+    img, spacing_y, spacing_x = _canonicalize_inplane_orientation_with_spacing(img, ds, spacing_y=spacing_y, spacing_x=spacing_x)
+    return img.astype(np.float32), (spacing_y, spacing_x), z
 
 
 def read_dicom_image(path: Path, *, window: Window | None = None) -> np.ndarray:
@@ -132,8 +264,24 @@ def read_dicom_image(path: Path, *, window: Window | None = None) -> np.ndarray:
 
     if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
         img = img.max() - img
+    img = _canonicalize_inplane_orientation(img, ds)
 
     win = window or get_window(ds)
     img = np.clip(img, win.lower, win.upper)
     img = (img - win.lower) / (win.upper - win.lower + 1e-6)
     return img.astype(np.float32)
+
+
+def read_dicom_image_and_spacing(path: Path, *, window: Window | None = None) -> tuple[np.ndarray, tuple[float | None, float | None]]:
+    ds = pydicom.dcmread(str(path), force=True)
+    spacing_y, spacing_x = _pixel_spacing(ds)
+    pixels = ds.pixel_array
+    img = dicom_to_hu(ds, pixels)
+    if getattr(ds, "PhotometricInterpretation", "") == "MONOCHROME1":
+        img = img.max() - img
+    img, spacing_y, spacing_x = _canonicalize_inplane_orientation_with_spacing(img, ds, spacing_y=spacing_y, spacing_x=spacing_x)
+
+    win = window or get_window(ds)
+    img = np.clip(img, win.lower, win.upper)
+    img = (img - win.lower) / (win.upper - win.lower + 1e-6)
+    return img.astype(np.float32), (spacing_y, spacing_x)

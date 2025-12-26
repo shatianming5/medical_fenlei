@@ -101,6 +101,15 @@ def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFra
 
     exam_lookup = _build_exam_dir_lookup(dicom_root)
 
+    def _maybe_text(r, name: str) -> str | None:
+        v = getattr(r, name, None)
+        if v is None:
+            return None
+        if isinstance(v, float) and pd.isna(v):
+            return None
+        s = str(v).strip()
+        return s if s else None
+
     for r in labels.itertuples(index=False):
         exam_dirs = exam_lookup.get(int(r.exam_id))
         if not exam_dirs:
@@ -114,20 +123,23 @@ def build_dataset_index(labels: pd.DataFrame, *, dicom_root: Path) -> pd.DataFra
 
         folder_date = exam_dir.parent.name
         label_date = getattr(r, "date", None)
-        rows.append(
-            {
-                "exam_id": int(r.exam_id),
-                "date": folder_date,
-                "label_date": label_date,
-                "folder_date": folder_date,
-                "date_match": bool(label_date == folder_date) if label_date is not None else False,
-                "ambiguous_match": bool(ambiguous),
-                "exam_relpath": str(exam_dir.relative_to(dicom_root)),
-                "series_relpath": str(series_dir.relative_to(dicom_root)),
-                "n_instances": int(n_instances),
-                "left_code": r.left_code,
-                "right_code": r.right_code,
-            }
-        )
+        row = {
+            "exam_id": int(r.exam_id),
+            "date": folder_date,
+            "label_date": label_date,
+            "folder_date": folder_date,
+            "date_match": bool(label_date == folder_date) if label_date is not None else False,
+            "ambiguous_match": bool(ambiguous),
+            "exam_relpath": str(exam_dir.relative_to(dicom_root)),
+            "series_relpath": str(series_dir.relative_to(dicom_root)),
+            "n_instances": int(n_instances),
+            "left_code": r.left_code,
+            "right_code": r.right_code,
+        }
+        for k in ("findings", "conclusion", "report_text"):
+            v = _maybe_text(r, k)
+            if v is not None:
+                row[k] = v
+        rows.append(row)
 
     return pd.DataFrame(rows)

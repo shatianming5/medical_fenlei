@@ -7,6 +7,7 @@ import re
 import pandas as pd
 import typer
 
+from medical_fenlei.cli_defaults import default_dicom_base, default_labels_xlsx
 from medical_fenlei.labels import load_labels_xlsx
 from medical_fenlei.paths import infer_dicom_root
 
@@ -35,9 +36,12 @@ def _scan_disk_exams(dicom_root: Path) -> dict[int, list[str]]:
 
 @app.command()
 def main(
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录（会自动向下推断真正的 dicom_root）"),
+    dicom_base: Path = typer.Option(
+        default_dicom_base(),
+        help="DICOM 数据基目录（会自动向下推断真正的 dicom_root）",
+    ),
     xlsx_path: Path = typer.Option(
-        Path("metadata/导出数据第1~4017条数据20240329-To模型训练团队.xlsx"),
+        default_labels_xlsx(),
         help="标注表 XLSX（本地文件，不入库）",
     ),
     limit: int | None = typer.Option(None, help="仅处理前 N 条（用于快速验证）"),
@@ -112,4 +116,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

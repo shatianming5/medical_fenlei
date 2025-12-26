@@ -4,6 +4,7 @@ from pathlib import Path
 
 import typer
 
+from medical_fenlei.cli_defaults import default_labels_xlsx
 from medical_fenlei.labels import load_labels_xlsx
 
 app = typer.Typer(add_completion=False)
@@ -12,7 +13,7 @@ app = typer.Typer(add_completion=False)
 @app.command()
 def main(
     xlsx_path: Path = typer.Option(
-        Path("metadata/导出数据第1~4017条数据20240329-To模型训练团队.xlsx"),
+        default_labels_xlsx(),
         exists=True,
         help="标注表 XLSX（本地文件，不入库）",
     ),
@@ -32,4 +33,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

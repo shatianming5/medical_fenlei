@@ -7,6 +7,7 @@ import torch
 import typer
 from torch.utils.data import DataLoader
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.side_dataset import EarCTSideDataset
 from medical_fenlei.models.resnet3d import ResNet10_3D
@@ -28,7 +29,7 @@ def _make_model(name: str, *, num_classes: int) -> torch.nn.Module:
 def main(
     checkpoint: Path = typer.Option(..., exists=True, help="outputs/.../checkpoints/best.pt 或 last.pt"),
     index_csv: Path = typer.Option(..., exists=True, help="artifacts/splits/*pct/val.csv 或自定义索引"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2")),
+    dicom_base: Path = typer.Option(default_dicom_base()),
     out_csv: Path = typer.Option(Path("artifacts/predictions_side.csv")),
     batch_size: int = typer.Option(1),
     num_workers: int = typer.Option(4),
@@ -87,4 +88,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

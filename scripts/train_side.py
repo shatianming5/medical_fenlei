@@ -10,6 +10,7 @@ import torch
 import typer
 from torch.utils.data import DataLoader
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.side_dataset import EarCTSideDataset
 from medical_fenlei.models.resnet3d import ResNet10_3D
@@ -104,7 +105,7 @@ def _resolve_split_paths(splits_root: Path, pct: int) -> tuple[Path, Path]:
 def main(
     splits_root: Path = typer.Option(Path("artifacts/splits"), help="由 scripts/make_splits.py 生成"),
     pct: int = typer.Option(100, help="训练数据比例：1 / 20 / 100"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录"),
+    dicom_base: Path = typer.Option(default_dicom_base(), help="DICOM 数据基目录"),
     output_dir: Path | None = typer.Option(None, help="输出目录（默认 outputs/<timestamp>）"),
     model: str = typer.Option("slice_mean_resnet18", help="slice_mean_resnet18 | resnet10_3d"),
     epochs: int = typer.Option(10),
@@ -228,4 +229,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

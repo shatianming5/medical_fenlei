@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from medical_fenlei.data.dicom import list_dicom_files, read_dicom_image
+from medical_fenlei.data.dicom import list_dicom_files_ipp, read_dicom_image
 
 
 def _evenly_spaced_indices(n: int, k: int) -> list[int]:
@@ -69,7 +69,7 @@ class EarCTSideDataset(Dataset):
         side = str(row["side"])
         label = int(row["label"])
 
-        files = list_dicom_files(series_dir)
+        files = list_dicom_files_ipp(series_dir)
         indices = _evenly_spaced_indices(len(files), self.num_slices)
         if not indices:
             raise RuntimeError(f"no dicom files in: {series_dir}")

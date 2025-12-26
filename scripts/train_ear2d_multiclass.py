@@ -13,6 +13,7 @@ import torch
 import typer
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.ear_dataset import EarCTHUEarDataset, EarPreprocessSpec
 from medical_fenlei.metrics import classification_report_from_confusion
@@ -205,7 +206,7 @@ def main(
     splits_root: Path = typer.Option(Path("artifacts/splits_dual"), help="split 根目录（建议使用 --patient-split 生成的目录）"),
     pct: int = typer.Option(20, help="训练数据比例：1 / 20 / 100"),
     manifest_csv: Path = typer.Option(Path("artifacts/manifest_ears.csv"), help="耳朵级 manifest（不入库）"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录"),
+    dicom_base: Path = typer.Option(default_dicom_base(), help="DICOM 数据基目录"),
     output_dir: Path | None = typer.Option(None, help="输出目录（默认 outputs/...；不入库）"),
     task_name: str = typer.Option("abnormal_subtype", help="仅用于命名输出目录（stage2 训练）"),
     target_codes: str = typer.Option("1,2,3,6", help="异常细分的目标 code 集合（逗号分隔）"),
@@ -226,8 +227,14 @@ def main(
     num_slices: int = typer.Option(32),
     image_size: int = typer.Option(224),
     crop_size: int = typer.Option(192),
+    crop_mode: str = typer.Option("temporal_patch", help="crop：bbox_bias | temporal_patch（颞骨 patch）"),
+    crop_lateral_band_frac: float = typer.Option(0.6, help="temporal_patch：外侧区域 band 宽度（0~1，越小越靠边）"),
+    crop_lateral_bias: float = typer.Option(0.25, help="x-center bias（越小越靠外侧）"),
+    crop_min_area: int = typer.Option(300, help="temporal_patch：连通域最小面积阈值（像素）"),
     sampling: str = typer.Option("even", help="even | air_block"),
     block_len: int = typer.Option(64),
+    target_spacing: float = typer.Option(0.0, help=">0 时启用：in-plane 重采样到统一 spacing（mm/px），会写入新的 cache key"),
+    target_z_spacing: float = typer.Option(0.0, help=">0 时启用：z 方向重采样到统一 spacing（mm），输出固定 num_slices 的物理窗口"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="使用 cache/ears_hu 缓存 HU 体数据"),
     cache_dir: Path = typer.Option(Path("cache/ears_hu"), help="缓存目录（不入库）"),
     lr: float = typer.Option(3e-4),
@@ -251,6 +258,10 @@ def main(
     early_stop_min_delta: float = typer.Option(0.0),
     seed: int = typer.Option(42),
 ) -> None:
+    crop_mode = str(crop_mode).strip()
+    if crop_mode not in ("bbox_bias", "temporal_patch"):
+        raise ValueError("crop_mode must be one of: bbox_bias, temporal_patch")
+
     code_list = [int(x.strip()) for x in str(target_codes).split(",") if x.strip()]
     if not code_list:
         raise typer.Exit(code=2)
@@ -311,14 +322,22 @@ def main(
         num_slices=int(num_slices),
         image_size=int(image_size),
         crop_size=int(crop_size),
+        crop_mode=str(crop_mode),
+        crop_lateral_band_frac=float(crop_lateral_band_frac),
+        crop_lateral_bias=float(crop_lateral_bias),
+        crop_min_area=int(crop_min_area),
         sampling=str(sampling),
         block_len=int(block_len),
-        version="v1",
+        target_spacing=float(target_spacing) if float(target_spacing) > 0 else None,
+        target_z_spacing=float(target_z_spacing) if float(target_z_spacing) > 0 else None,
+        version="v3",
     )
 
     used_cache_dir = None
     if cache:
-        used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}_c{int(crop_size)}_{str(sampling)}"
+        ts_tag = f"_ts{float(target_spacing):.6g}" if float(target_spacing) > 0 else ""
+        tz_tag = f"_tz{float(target_z_spacing):.6g}" if float(target_z_spacing) > 0 else ""
+        used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}_c{int(crop_size)}_{str(sampling)}{ts_tag}{tz_tag}_crop{crop_mode}"
 
     _seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -604,4 +623,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

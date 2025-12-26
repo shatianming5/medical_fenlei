@@ -7,6 +7,8 @@ from pathlib import Path
 
 import typer
 
+from medical_fenlei.cli_defaults import default_dicom_base
+
 app = typer.Typer(add_completion=False)
 
 
@@ -37,7 +39,7 @@ def main(
     ),
     label_task: str = typer.Option("six_class", help="标签任务：six_class 或二分类任务名（见 scripts/train_dual.py --help）"),
     splits_root: Path = typer.Option(Path("artifacts/splits_dual"), help="split 根目录"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录"),
+    dicom_base: Path = typer.Option(default_dicom_base(), help="DICOM 数据基目录"),
     num_slices: int = typer.Option(32),
     image_size: int = typer.Option(224),
     num_workers: int = typer.Option(16),

@@ -23,5 +23,9 @@ dependencies:
       - einops
       - pylibjpeg
       - pylibjpeg-libjpeg
+      - platformdirs
+      - transformers
+      - sentencepiece
+      - wandb
       - rich
       - typer

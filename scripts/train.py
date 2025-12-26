@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.dataset import EarCTDataset
 from medical_fenlei.models.slice_resnet import SliceMeanResNet
@@ -104,7 +105,7 @@ def _run_epoch(
 @app.command()
 def main(
     index_csv: Path = typer.Option(Path("artifacts/dataset_index.csv"), exists=True, help="由 scripts/build_index.py 生成"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录"),
+    dicom_base: Path = typer.Option(default_dicom_base(), help="DICOM 数据基目录"),
     output_dir: Path | None = typer.Option(None, help="输出目录（默认 outputs/<timestamp>）"),
     epochs: int = typer.Option(10),
     batch_size: int = typer.Option(2),

@@ -13,6 +13,7 @@ import pandas as pd
 import pydicom
 import typer
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.paths import infer_dicom_root
 from medical_fenlei.tasks import TASKS
@@ -171,7 +172,10 @@ def _expand_ears(index_df: pd.DataFrame) -> pd.DataFrame:
 @app.command()
 def main(
     index_csv: Path = typer.Option(Path("artifacts/dataset_index.csv"), exists=True, help="由 scripts/build_index.py 生成（不入库）"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录（会自动推断 dicom_root）"),
+    dicom_base: Path = typer.Option(
+        default_dicom_base(),
+        help="DICOM 数据基目录（会自动推断 dicom_root）",
+    ),
     out_csv: Path = typer.Option(Path("artifacts/manifest_ears.csv"), help="耳朵级 manifest（不入库）"),
     num_workers: int = typer.Option(16, help="并行读取 DICOM header 的线程数"),
     hash_salt: str = typer.Option("", help="可选：对 patient_id/name 做 hash 的 salt（留空也可）"),
@@ -261,4 +265,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

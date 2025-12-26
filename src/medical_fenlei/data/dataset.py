@@ -8,7 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 
-from medical_fenlei.data.dicom import list_dicom_files, read_dicom_image
+from medical_fenlei.data.dicom import list_dicom_files_ipp, read_dicom_image
 
 
 def _safe_int(value) -> int | None:
@@ -67,7 +67,7 @@ class EarCTDataset(Dataset):
     def __getitem__(self, i: int):
         row = self.index.iloc[i]
         series_dir = self.dicom_root / str(row["series_relpath"])
-        files = list_dicom_files(series_dir)
+        files = list_dicom_files_ipp(series_dir)
         indices = _evenly_spaced_indices(len(files), self.num_slices)
 
         left_slices: list[torch.Tensor] = []

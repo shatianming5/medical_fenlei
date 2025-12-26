@@ -29,6 +29,9 @@ def load_labels_xlsx(
     time_col: str = "检查时间",
     left_col: str = "左侧诊断-训练",
     right_col: str = "右侧诊断-训练",
+    findings_col: str = "影像所见",
+    conclusion_col: str = "检查结论",
+    include_report_text: bool = True,
 ) -> pd.DataFrame:
     """
     Load and de-identify labels from the XLSX.
@@ -38,6 +41,7 @@ def load_labels_xlsx(
       - date (YYYY-MM-DD)
       - left_code / left_name
       - right_code / right_name
+      - (optional) findings / conclusion / report_text
     """
     df = pd.read_excel(xlsx_path, sheet_name=sheet_name)
 
@@ -48,16 +52,28 @@ def load_labels_xlsx(
     left_parsed = df[left_col].apply(_parse_diag)
     right_parsed = df[right_col].apply(_parse_diag)
 
-    out = pd.DataFrame(
-        {
-            "exam_id": exam,
-            "date": date,
-            "left_code": [c for c, _ in left_parsed],
-            "left_name": [n for _, n in left_parsed],
-            "right_code": [c for c, _ in right_parsed],
-            "right_name": [n for _, n in right_parsed],
-        }
-    )
+    data = {
+        "exam_id": exam,
+        "date": date,
+        "left_code": [c for c, _ in left_parsed],
+        "left_name": [n for _, n in left_parsed],
+        "right_code": [c for c, _ in right_parsed],
+        "right_name": [n for _, n in right_parsed],
+    }
+
+    if bool(include_report_text):
+        def _norm_text(v) -> str:
+            if v is None or (isinstance(v, float) and pd.isna(v)):
+                return ""
+            s = str(v).replace("\r\n", "\n").replace("\r", "\n").strip()
+            return s
+
+        findings = df[findings_col].apply(_norm_text) if findings_col in df.columns else pd.Series([""] * len(df))
+        conclusion = df[conclusion_col].apply(_norm_text) if conclusion_col in df.columns else pd.Series([""] * len(df))
+        report_text = (findings + "\n" + conclusion).str.strip()
+        data.update({"findings": findings, "conclusion": conclusion, "report_text": report_text})
+
+    out = pd.DataFrame(data)
 
     out = out.dropna(subset=["exam_id", "date"])
     out["exam_id"] = out["exam_id"].astype("int64")

@@ -9,6 +9,8 @@ from pathlib import Path
 import pandas as pd
 import typer
 
+from medical_fenlei.cli_defaults import default_dicom_base
+
 app = typer.Typer(add_completion=False)
 
 
@@ -24,7 +26,7 @@ def main(
     backbone: str = typer.Option("resnet18"),
     splits_root: Path = typer.Option(Path("artifacts/splits_dual")),
     manifest_csv: Path = typer.Option(Path("artifacts/manifest_ears.csv")),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2")),
+    dicom_base: Path = typer.Option(default_dicom_base()),
     cache_dir: Path = typer.Option(Path("cache/ears_hu")),
     out_root: Path = typer.Option(Path("outputs/ear2d_seeds"), help="多个 seed 的输出根目录（不入库）"),
     epochs: int = typer.Option(50),
@@ -158,4 +160,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

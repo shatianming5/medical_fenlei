@@ -7,8 +7,9 @@ import torch
 import typer
 from torch.utils.data import DataLoader
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
-from medical_fenlei.data.dual_dataset import EarCTDualDataset
+from medical_fenlei.data.dual_dataset import DualPreprocessSpec, EarCTDualDataset
 from medical_fenlei.models.dual_factory import make_dual_model
 from medical_fenlei.paths import infer_dicom_root
 from medical_fenlei.tasks import resolve_task
@@ -49,7 +50,7 @@ def _apply_binary_task(
 def main(
     checkpoint: Path = typer.Option(..., exists=True, help="outputs/.../checkpoints/best.pt 或 last.pt"),
     index_csv: Path = typer.Option(..., exists=True, help="artifacts/splits_dual/*pct/val.csv 或自定义索引"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2")),
+    dicom_base: Path = typer.Option(default_dicom_base()),
     out_csv: Path = typer.Option(Path("artifacts/predictions_dual.csv")),
     label_task: str | None = typer.Option(None, help="默认从 checkpoint 读取（没有则按 six_class）"),
     batch_size: int = typer.Option(1),
@@ -92,12 +93,77 @@ def main(
     if not cache:
         used_cache_dir = None
 
+    pre = ckpt.get("preprocess")
+    if isinstance(pre, dict):
+        crop_size = int(pre.get("crop_size", 192) or 192)
+        sampling = str(pre.get("sampling", "air_block") or "air_block")
+        block_len = int(pre.get("block_len", 64) or 64)
+        target_spacing = float(pre.get("target_spacing", 0.0) or 0.0)
+        target_z_spacing = float(pre.get("target_z_spacing", 0.0) or 0.0)
+        try:
+            window_wl = float(pre.get("window_wl", 700.0))
+        except Exception:
+            window_wl = 700.0
+        try:
+            window_ww = float(pre.get("window_ww", 4000.0))
+        except Exception:
+            window_ww = 4000.0
+        try:
+            window2_wl = float(pre.get("window2_wl", 0.0) or 0.0)
+        except Exception:
+            window2_wl = 0.0
+        try:
+            window2_ww = float(pre.get("window2_ww", 0.0) or 0.0)
+        except Exception:
+            window2_ww = 0.0
+        pair_features = str(pre.get("pair_features", "none") or "none").strip().lower()
+    else:
+        crop_size = 192
+        sampling = "air_block"
+        block_len = 64
+        target_spacing = 0.7
+        target_z_spacing = 0.8
+        window_wl = 700.0
+        window_ww = 4000.0
+        window2_wl = 0.0
+        window2_ww = 0.0
+        pair_features = "none"
+
+    w2_ww = float(window2_ww)
+    w2_wl = float(window2_wl)
+    window2_wl_v = w2_wl if w2_ww > 0 else None
+    window2_ww_v = w2_ww if w2_ww > 0 else None
+    if str(pair_features) not in {"none", "self_other_diff"}:
+        raise ValueError(f"unknown pair_features: {pair_features!r} (expected none|self_other_diff)")
+
+    ckpt_in_channels = ckpt.get("in_channels")
+    if isinstance(ckpt_in_channels, (int, float)) and int(ckpt_in_channels) > 0:
+        in_channels = int(ckpt_in_channels)
+    else:
+        base_channels = 2 if window2_ww_v is not None else 1
+        pair_factor = 3 if str(pair_features) == "self_other_diff" else 1
+        in_channels = int(base_channels) * int(pair_factor)
+
+    preprocess_spec = DualPreprocessSpec(
+        num_slices=int(num_slices),
+        image_size=int(image_size),
+        crop_size=int(crop_size),
+        window_wl=float(window_wl),
+        window_ww=float(window_ww),
+        window2_wl=window2_wl_v,
+        window2_ww=window2_ww_v,
+        pair_features=str(pair_features),
+        sampling=str(sampling),
+        block_len=int(block_len),
+        flip_right=True,
+        target_spacing=float(target_spacing) if float(target_spacing) > 0 else None,
+        target_z_spacing=float(target_z_spacing) if float(target_z_spacing) > 0 else None,
+    )
+
     ds = EarCTDualDataset(
         index_df=df,
         dicom_root=dicom_root,
-        num_slices=int(num_slices),
-        image_size=int(image_size),
-        flip_right=True,
+        spec=preprocess_spec,
         cache_dir=used_cache_dir,
         cache_dtype=cache_dtype,
     )
@@ -109,9 +175,10 @@ def main(
     model, _ = make_dual_model(
         model_name,
         num_classes=num_classes,
-        in_channels=1,
+        in_channels=int(in_channels),
         img_size=img_size,
         vit_patch_size=tuple(model_kwargs.get("vit_patch_size", (4, 16, 16))),
+        vit_pool=str(model_kwargs.get("vit_pool", "cls")),
         vit_hidden_size=int(model_kwargs.get("vit_hidden_size", 768)),
         vit_mlp_dim=int(model_kwargs.get("vit_mlp_dim", 3072)),
         vit_num_layers=int(model_kwargs.get("vit_num_layers", 12)),

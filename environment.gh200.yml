@@ -1,0 +1,32 @@
+name: medical_fenlei
+channels:
+  # GH200 (linux-aarch64) note:
+  # - conda-forge does not provide CUDA-enabled PyTorch for aarch64.
+  # - This repo assumes a CUDA-enabled torch build is available (e.g. system package on this machine).
+  # - After creating the env, run tools/gh200_enable_system_torch.sh to expose system torch+torchvision.
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  # Keep NumPy <2 because the system CUDA torch build on this machine is compiled
+  # against the NumPy 1.x C-API.
+  - numpy<2
+  - pandas
+  - scikit-learn
+  - tqdm
+  - pillow
+  - matplotlib
+  - openpyxl
+  - pydicom
+  - sympy
+  - pip:
+      - monai
+      - einops
+      - pylibjpeg
+      - pylibjpeg-libjpeg
+      - platformdirs
+      - transformers
+      - sentencepiece
+      - wandb
+      - rich
+      - typer

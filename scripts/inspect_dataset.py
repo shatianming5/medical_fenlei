@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.paths import infer_dicom_root
 
 app = typer.Typer(add_completion=False)
@@ -16,7 +17,7 @@ def _run(cmd: list[str]) -> str:
 
 @app.command()
 def main(
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录"),
+    dicom_base: Path = typer.Option(default_dicom_base(), help="DICOM 数据基目录"),
 ) -> None:
     dicom_root = infer_dicom_root(dicom_base)
     date_dirs = _run(["bash", "-lc", f"find '{dicom_root}' -maxdepth 1 -mindepth 1 -type d | wc -l"])
@@ -33,4 +34,3 @@ def main(
 
 if __name__ == "__main__":
     app()
-

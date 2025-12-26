@@ -7,6 +7,7 @@ import torch
 import typer
 from torch.utils.data import DataLoader
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.constants import CLASS_ID_TO_NAME
 from medical_fenlei.data.dataset import EarCTDataset
 from medical_fenlei.models.slice_resnet import SliceMeanResNet
@@ -19,7 +20,7 @@ app = typer.Typer(add_completion=False)
 def main(
     checkpoint: Path = typer.Option(..., exists=True, help="训练输出的 best.pt/last.pt"),
     index_csv: Path = typer.Option(Path("artifacts/dataset_index.csv"), exists=True),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2")),
+    dicom_base: Path = typer.Option(default_dicom_base()),
     out_csv: Path = typer.Option(Path("artifacts/predictions.csv")),
     batch_size: int = typer.Option(1),
     num_workers: int = typer.Option(4),

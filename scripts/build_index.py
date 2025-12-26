@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import typer
 
+from medical_fenlei.cli_defaults import default_dicom_base, default_labels_xlsx
 from medical_fenlei.indexing import build_dataset_index
 from medical_fenlei.labels import load_labels_xlsx
 from medical_fenlei.paths import infer_dicom_root
@@ -15,11 +16,11 @@ app = typer.Typer(add_completion=False)
 @app.command()
 def main(
     dicom_base: Path = typer.Option(
-        Path("data/medical_data_2"),
+        default_dicom_base(),
         help="DICOM 数据基目录（会自动向下推断真正的 dicom_root）",
     ),
     xlsx_path: Path = typer.Option(
-        Path("metadata/导出数据第1~4017条数据20240329-To模型训练团队.xlsx"),
+        default_labels_xlsx(),
         help="标注表 XLSX（本地文件，不入库）",
     ),
     limit: int | None = typer.Option(None, help="仅处理前 N 条（用于快速验证）"),

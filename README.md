@@ -90,6 +90,16 @@ python scripts/build_index.py --out-csv artifacts/dataset_index.csv
 python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual --ratios 0.01,0.2,1.0
 ```
 
+补充（对照 `check.md` 5.1 长尾设置 A/B）：
+
+```bash
+# 设置A：仅使用 Label 1,2,3,5（严格：drop_exam，避免双侧输入里混入其他类图像）
+python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual_A --ratios 0.01,0.2,1.0 --keep-codes 1,2,3,5 --keep-mode drop_exam
+
+# 设置B：训练集移除 Label2(胆脂瘤)，测试集保留（零样本模拟；推荐 drop_exam 避免“看见未标注图像”泄漏）
+python scripts/make_splits_dual.py --index-csv artifacts/dataset_index.csv --out-dir artifacts/splits_dual_B --ratios 0.01,0.2,1.0 --keep-codes 1,2,3,5 --keep-mode drop_exam --drop-train-codes 2 --drop-train-mode drop_exam
+```
+
 补充：`artifacts/dataset_index.csv` 共 `4012` 条检查号可匹配，其中 `153` 条左右耳均无标注，因此 split 会自动剔除，实际可用检查数为 `3859`。
 
 3) （强烈建议）先构建缓存，避免每个 epoch 反复解码 DICOM 导致 GPU 空转：

@@ -11,12 +11,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+import torch.nn.functional as F
 import typer
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
+from medical_fenlei.cli_defaults import default_dicom_base
 from medical_fenlei.data.ear_dataset import EarCTHUEarDataset, EarPreprocessSpec
 from medical_fenlei.metrics import binary_metrics
 from medical_fenlei.models.slice_attention_resnet import SliceAttentionResNet
+from medical_fenlei.models.slice_attention_unet import SliceAttentionUNet
+from medical_fenlei.models.slice_attention_vit import SliceAttentionViT
 from medical_fenlei.paths import infer_dicom_root
 from medical_fenlei.tasks import resolve_task
 
@@ -59,61 +63,111 @@ def _augment_unit_volume(
     intensity_prob: float,
     noise_prob: float,
     gamma_prob: float,
+    affine_prob: float,
+    affine_degrees: float,
+    affine_translate: float,
+    affine_scale_low: float,
+    affine_scale_high: float,
 ) -> torch.Tensor:
     # x: (B,K,1,H,W) in [0,1]
     if x.ndim != 5:
         return x
-    if max(flip_prob, intensity_prob, noise_prob, gamma_prob) <= 0:
+    if max(flip_prob, intensity_prob, noise_prob, gamma_prob, affine_prob) <= 0:
         return x
 
     b, k = int(x.shape[0]), int(x.shape[1])
-    n = b * k
-    x2 = x.reshape(n, *x.shape[2:]).contiguous()  # (N,1,H,W)
 
-    orig_dtype = x2.dtype
+    orig_dtype = x.dtype
+    x2 = x
     if orig_dtype in (torch.float16, torch.bfloat16):
         x2 = x2.float()
 
     device = x2.device
 
-    # Random flips (per slice) on H/W.
+    # Random affine per ear-volume (apply same transform to all slices).
+    affine_prob = float(affine_prob)
+    if affine_prob > 0:
+        do_a = torch.rand((b,), device=device) < float(affine_prob)
+        if do_a.any():
+            theta = torch.zeros((b, 2, 3), device=device, dtype=x2.dtype)
+            theta[:, 0, 0] = 1.0
+            theta[:, 1, 1] = 1.0
+
+            idx = do_a.nonzero(as_tuple=False).view(-1)
+            n_a = int(idx.numel())
+            deg = float(affine_degrees)
+            ang = _rand_uniform((n_a,), device=device, low=-deg, high=deg, dtype=x2.dtype) * (math.pi / 180.0)
+            s = _rand_uniform(
+                (n_a,),
+                device=device,
+                low=float(affine_scale_low),
+                high=float(affine_scale_high),
+                dtype=x2.dtype,
+            )
+            tmax = float(max(0.0, float(affine_translate))) * 2.0  # normalized [-1..1] coords
+            tx = _rand_uniform((n_a,), device=device, low=-tmax, high=tmax, dtype=x2.dtype)
+            ty = _rand_uniform((n_a,), device=device, low=-tmax, high=tmax, dtype=x2.dtype)
+
+            ca = torch.cos(ang) * s
+            sa = torch.sin(ang) * s
+            theta[idx, 0, 0] = ca
+            theta[idx, 0, 1] = -sa
+            theta[idx, 0, 2] = tx
+            theta[idx, 1, 0] = sa
+            theta[idx, 1, 1] = ca
+            theta[idx, 1, 2] = ty
+
+            x_flat = x2.reshape(b * k, *x2.shape[2:]).contiguous()
+            theta_rep = theta.repeat_interleave(k, dim=0)
+            grid = F.affine_grid(theta_rep, size=x_flat.shape, align_corners=False)
+            x_flat = F.grid_sample(x_flat, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+            x2 = x_flat.reshape(b, k, *x2.shape[2:]).contiguous()
+
+    # Random flips per ear-volume on H/W.
+    flip_prob = float(flip_prob)
     if flip_prob > 0:
-        do_h = torch.rand((n,), device=device) < float(flip_prob)
-        do_w = torch.rand((n,), device=device) < float(flip_prob)
+        do_h = torch.rand((b,), device=device) < float(flip_prob)
+        do_w = torch.rand((b,), device=device) < float(flip_prob)
         if do_h.any():
             x2[do_h] = x2[do_h].flip(-2)
         if do_w.any():
             x2[do_w] = x2[do_w].flip(-1)
 
-    # Random intensity scale/shift.
+    # Random intensity scale/shift per ear-volume.
+    intensity_prob = float(intensity_prob)
     if intensity_prob > 0:
-        do_i = torch.rand((n,), device=device) < float(intensity_prob)
+        do_i = torch.rand((b,), device=device) < float(intensity_prob)
         if do_i.any():
-            scale = _rand_uniform((int(do_i.sum()), 1, 1, 1), device=device, low=0.90, high=1.10, dtype=x2.dtype)
-            shift = _rand_uniform((int(do_i.sum()), 1, 1, 1), device=device, low=-0.10, high=0.10, dtype=x2.dtype)
+            n_i = int(do_i.sum().item())
+            scale = _rand_uniform((n_i, 1, 1, 1, 1), device=device, low=0.85, high=1.15, dtype=x2.dtype)
+            shift = _rand_uniform((n_i, 1, 1, 1, 1), device=device, low=-0.15, high=0.15, dtype=x2.dtype)
             x2_do = x2[do_i]
-            x2_do = x2_do * scale + shift
-            x2[do_i] = x2_do
+            x2[do_i] = x2_do * scale + shift
 
-    # Random gamma.
+    # Random gamma per ear-volume.
+    gamma_prob = float(gamma_prob)
     if gamma_prob > 0:
-        do_g = torch.rand((n,), device=device) < float(gamma_prob)
+        do_g = torch.rand((b,), device=device) < float(gamma_prob)
         if do_g.any():
-            gamma = _rand_uniform((int(do_g.sum()), 1, 1, 1), device=device, low=0.70, high=1.50, dtype=x2.dtype)
+            n_g = int(do_g.sum().item())
+            gamma = _rand_uniform((n_g, 1, 1, 1, 1), device=device, low=0.60, high=1.60, dtype=x2.dtype)
             x2_do = x2[do_g].clamp(min=1e-6, max=1.0)
             x2[do_g] = x2_do**gamma
 
-    # Random gaussian noise.
+    # Random gaussian noise per ear-volume.
+    noise_prob = float(noise_prob)
     if noise_prob > 0:
-        do_n = torch.rand((n,), device=device) < float(noise_prob)
+        do_n = torch.rand((b,), device=device) < float(noise_prob)
         if do_n.any():
-            std = _rand_uniform((int(do_n.sum()), 1, 1, 1), device=device, low=0.0, high=0.03, dtype=x2.dtype)
-            x2[do_n] = x2[do_n] + torch.randn_like(x2[do_n]) * std
+            n_n = int(do_n.sum().item())
+            std = _rand_uniform((n_n, 1, 1, 1, 1), device=device, low=0.0, high=0.05, dtype=x2.dtype)
+            x2_do = x2[do_n]
+            x2[do_n] = x2_do + torch.randn_like(x2_do) * std
 
     x2 = x2.clamp(0.0, 1.0)
     if x2.dtype != orig_dtype:
         x2 = x2.to(orig_dtype)
-    return x2.reshape(b, k, *x.shape[2:]).contiguous()
+    return x2.contiguous()
 
 
 def _make_balanced_sampler(y: np.ndarray, *, seed: int) -> WeightedRandomSampler:
@@ -284,10 +338,21 @@ def main(
     splits_root: Path = typer.Option(Path("artifacts/splits_dual"), help="split 根目录（建议使用 --patient-split 生成的目录）"),
     pct: int = typer.Option(20, help="训练数据比例：1 / 20 / 100"),
     manifest_csv: Path = typer.Option(Path("artifacts/manifest_ears.csv"), help="耳朵级 manifest（不入库）"),
-    dicom_base: Path = typer.Option(Path("data/medical_data_2"), help="DICOM 数据基目录"),
+    dicom_base: Path = typer.Option(default_dicom_base(), help="DICOM 数据基目录"),
     output_dir: Path | None = typer.Option(None, help="输出目录（默认 outputs/...；不入库）"),
     label_task: str = typer.Option("normal_vs_diseased", help="二分类任务名（见 src/medical_fenlei/tasks.py）"),
+    model: str = typer.Option("resnet", help="resnet | vit | unet"),
     backbone: str = typer.Option("resnet18", help="resnet18 | resnet34 | resnet50"),
+    vit_patch_size: int = typer.Option(16, help="仅当 model=vit 时：patch_size"),
+    vit_hidden_size: int = typer.Option(512, help="仅当 model=vit 时：hidden size"),
+    vit_mlp_dim: int = typer.Option(2048, help="仅当 model=vit 时：MLP dim（0 表示自动=4*hidden）"),
+    vit_num_layers: int = typer.Option(8, help="仅当 model=vit 时：transformer layers"),
+    vit_num_heads: int = typer.Option(8, help="仅当 model=vit 时：attention heads"),
+    vit_dropout: float = typer.Option(0.1, help="仅当 model=vit 时：dropout"),
+    unet_embed_dim: int = typer.Option(128, help="仅当 model=unet 时：每个 slice 的 embedding dim（UNet out_channels）"),
+    unet_channels: str = typer.Option("16,32,64,128,256", help="仅当 model=unet 时：channels（逗号分隔）"),
+    unet_strides: str = typer.Option("2,2,2,2", help="仅当 model=unet 时：strides（逗号分隔）"),
+    unet_num_res_units: int = typer.Option(2, help="仅当 model=unet 时：num_res_units"),
     aggregator: str = typer.Option("attention", help="z 聚合方式：attention | transformer | mean"),
     attn_hidden: int = typer.Option(128),
     dropout: float = typer.Option(0.2),
@@ -303,8 +368,14 @@ def main(
     num_slices: int = typer.Option(32),
     image_size: int = typer.Option(224),
     crop_size: int = typer.Option(192),
+    crop_mode: str = typer.Option("temporal_patch", help="crop：bbox_bias | temporal_patch（颞骨 patch）"),
+    crop_lateral_band_frac: float = typer.Option(0.6, help="temporal_patch：外侧区域 band 宽度（0~1，越小越靠边）"),
+    crop_lateral_bias: float = typer.Option(0.25, help="x-center bias（越小越靠外侧）"),
+    crop_min_area: int = typer.Option(300, help="temporal_patch：连通域最小面积阈值（像素）"),
     sampling: str = typer.Option("even", help="even | air_block"),
     block_len: int = typer.Option(64),
+    target_spacing: float = typer.Option(0.0, help=">0 时启用：in-plane 重采样到统一 spacing（mm/px），会写入新的 cache key"),
+    target_z_spacing: float = typer.Option(0.0, help=">0 时启用：z 方向重采样到统一 spacing（mm），输出固定 num_slices 的物理窗口"),
     cache: bool = typer.Option(True, "--cache/--no-cache", help="使用 cache/ears_hu 缓存 HU 体数据"),
     cache_dir: Path = typer.Option(Path("cache/ears_hu"), help="缓存目录（不入库）"),
     lr: float = typer.Option(3e-4),
@@ -320,6 +391,11 @@ def main(
     aug_intensity_prob: float = typer.Option(0.6),
     aug_noise_prob: float = typer.Option(0.2),
     aug_gamma_prob: float = typer.Option(0.2),
+    aug_affine_prob: float = typer.Option(0.0, help="几何增强：随机仿射（按 ear-volume 同步应用到所有 slice）"),
+    aug_affine_degrees: float = typer.Option(12.0, help="随机旋转角度范围（±deg）"),
+    aug_affine_translate: float = typer.Option(0.08, help="随机平移范围（相对图像尺寸比例，如 0.08 表示 8%）"),
+    aug_affine_scale_low: float = typer.Option(0.85, help="随机缩放下限"),
+    aug_affine_scale_high: float = typer.Option(1.15, help="随机缩放上限"),
     base_wl: float = typer.Option(500.0),
     base_ww: float = typer.Option(3000.0),
     wl_jitter: float = typer.Option(200.0),
@@ -331,14 +407,30 @@ def main(
     drop_high_loss_frac: float = typer.Option(0.0, help="robust：每个 batch 内按类丢弃 top-loss 比例（0 表示禁用）"),
     drop_high_loss_warmup_epochs: int = typer.Option(0, help="robust：在前 N 个 epoch 线性 warmup 到 drop_high_loss_frac"),
     early_stop_patience: int = typer.Option(10),
-    early_stop_metric: str = typer.Option("auprc", help="auprc | auroc | sensitivity_at_spec | f1 | loss"),
+    early_stop_metric: str = typer.Option("acc", help="acc | auprc | auroc | sensitivity_at_spec | f1 | loss"),
     early_stop_min_delta: float = typer.Option(0.0),
     specificity_target: float = typer.Option(0.95, help="用于 sensitivity_at_spec 的目标 specificity"),
     freeze_backbone_epochs: int = typer.Option(0, help="前 N 个 epoch 冻结 backbone（linear probe）"),
     train_limit: int | None = typer.Option(None, help="仅使用前 N 个训练耳朵样本（用于 smoke）"),
     val_limit: int | None = typer.Option(None, help="仅使用前 N 个验证耳朵样本（用于 smoke）"),
+    wandb: bool = typer.Option(False, "--wandb/--no-wandb", help="上传训练指标到 Weights & Biases"),
+    wandb_project: str = typer.Option("medical_fenlei"),
+    wandb_entity: str | None = typer.Option(None),
+    wandb_name: str | None = typer.Option(None),
+    wandb_group: str | None = typer.Option(None),
+    wandb_tags: str = typer.Option("", help="逗号分隔 tags"),
+    wandb_mode: str = typer.Option("online", help="online | offline | disabled"),
+    wandb_dir: Path = typer.Option(Path("wandb"), help="wandb 本地目录（不入库）"),
     seed: int = typer.Option(42),
 ) -> None:
+    crop_mode = str(crop_mode).strip()
+    if crop_mode not in ("bbox_bias", "temporal_patch"):
+        raise ValueError("crop_mode must be one of: bbox_bias, temporal_patch")
+
+    model = str(model).strip().lower()
+    if model not in ("resnet", "vit", "unet"):
+        raise ValueError("model must be one of: resnet, vit, unet")
+
     loss_name = str(loss).strip().lower()
     if loss_name not in ("bce", "focal"):
         raise ValueError("loss must be one of: bce, focal")
@@ -399,14 +491,22 @@ def main(
         num_slices=int(num_slices),
         image_size=int(image_size),
         crop_size=int(crop_size),
+        crop_mode=str(crop_mode),
+        crop_lateral_band_frac=float(crop_lateral_band_frac),
+        crop_lateral_bias=float(crop_lateral_bias),
+        crop_min_area=int(crop_min_area),
         sampling=str(sampling),
         block_len=int(block_len),
-        version="v1",
+        target_spacing=float(target_spacing) if float(target_spacing) > 0 else None,
+        target_z_spacing=float(target_z_spacing) if float(target_z_spacing) > 0 else None,
+        version="v3",
     )
 
     used_cache_dir = None
     if cache:
-        used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}_c{int(crop_size)}_{str(sampling)}"
+        ts_tag = f"_ts{float(target_spacing):.6g}" if float(target_spacing) > 0 else ""
+        tz_tag = f"_tz{float(target_z_spacing):.6g}" if float(target_z_spacing) > 0 else ""
+        used_cache_dir = cache_dir / f"d{int(num_slices)}_s{int(image_size)}_c{int(crop_size)}_{str(sampling)}{ts_tag}{tz_tag}_crop{crop_mode}"
 
     _seed_everything(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -447,19 +547,73 @@ def main(
     if use_pos_weight and pos_n > 0 and neg_n > 0:
         pos_weight = min(float(max_pos_weight), float(neg_n) / float(pos_n))
 
-    model = SliceAttentionResNet(
-        backbone=str(backbone),
-        in_channels=1,
-        aggregator=str(aggregator),
-        attn_hidden=int(attn_hidden),
-        dropout=float(dropout),
-        out_dim=1,
-        transformer_layers=int(transformer_layers),
-        transformer_heads=int(transformer_heads),
-        transformer_ff_dim=int(transformer_ff_dim),
-        transformer_dropout=float(transformer_dropout),
-        transformer_max_len=int(transformer_max_len),
-    ).to(device)
+    model_type: str
+    if model == "resnet":
+        model_type = "SliceAttentionResNet"
+        net: torch.nn.Module = SliceAttentionResNet(
+            backbone=str(backbone),
+            in_channels=1,
+            aggregator=str(aggregator),
+            attn_hidden=int(attn_hidden),
+            dropout=float(dropout),
+            out_dim=1,
+            transformer_layers=int(transformer_layers),
+            transformer_heads=int(transformer_heads),
+            transformer_ff_dim=int(transformer_ff_dim),
+            transformer_dropout=float(transformer_dropout),
+            transformer_max_len=int(transformer_max_len),
+        )
+    elif model == "vit":
+        model_type = "SliceAttentionViT"
+        net = SliceAttentionViT(
+            in_channels=1,
+            image_size=int(image_size),
+            patch_size=int(vit_patch_size),
+            vit_hidden_size=int(vit_hidden_size),
+            vit_mlp_dim=int(vit_mlp_dim),
+            vit_num_layers=int(vit_num_layers),
+            vit_num_heads=int(vit_num_heads),
+            vit_dropout=float(vit_dropout),
+            aggregator=str(aggregator),
+            attn_hidden=int(attn_hidden),
+            dropout=float(dropout),
+            out_dim=1,
+            transformer_layers=int(transformer_layers),
+            transformer_heads=int(transformer_heads),
+            transformer_ff_dim=int(transformer_ff_dim),
+            transformer_dropout=float(transformer_dropout),
+            transformer_max_len=int(transformer_max_len),
+        )
+    else:
+        model_type = "SliceAttentionUNet"
+
+        def _parse_ints(s: str, *, name: str) -> tuple[int, ...]:
+            parts = [p.strip() for p in str(s).split(",") if p.strip()]
+            if not parts:
+                raise ValueError(f"{name} must be a non-empty comma-separated list")
+            return tuple(int(p) for p in parts)
+
+        net = SliceAttentionUNet(
+            in_channels=1,
+            image_size=int(image_size),
+            unet_channels=_parse_ints(unet_channels, name="unet_channels"),
+            unet_strides=_parse_ints(unet_strides, name="unet_strides"),
+            unet_num_res_units=int(unet_num_res_units),
+            unet_embed_dim=int(unet_embed_dim),
+            aggregator=str(aggregator),
+            attn_hidden=int(attn_hidden),
+            dropout=float(dropout),
+            out_dim=1,
+            transformer_layers=int(transformer_layers),
+            transformer_heads=int(transformer_heads),
+            transformer_ff_dim=int(transformer_ff_dim),
+            transformer_dropout=float(transformer_dropout),
+            transformer_max_len=int(transformer_max_len),
+        )
+
+    model_any = net.to(device)
+    # keep the old variable name for minimal diff
+    model = model_any
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=float(lr), weight_decay=float(weight_decay))
 
@@ -489,7 +643,7 @@ def main(
             "cache_dir": str(used_cache_dir) if used_cache_dir is not None else None,
             "spec": spec.__dict__,
         },
-        "model": {"type": "SliceAttentionResNet", "spec": model.spec.__dict__},
+        "model": {"type": str(model_type), "spec": model.spec.__dict__},
         "train": {
             "epochs": int(epochs),
             "batch_size": int(batch_size),
@@ -509,6 +663,11 @@ def main(
             "aug_intensity_prob": float(aug_intensity_prob),
             "aug_noise_prob": float(aug_noise_prob),
             "aug_gamma_prob": float(aug_gamma_prob),
+            "aug_affine_prob": float(aug_affine_prob),
+            "aug_affine_degrees": float(aug_affine_degrees),
+            "aug_affine_translate": float(aug_affine_translate),
+            "aug_affine_scale_low": float(aug_affine_scale_low),
+            "aug_affine_scale_high": float(aug_affine_scale_high),
             "loss": str(loss_name),
             "focal_gamma": float(focal_gamma),
             "focal_alpha": float(focal_alpha) if focal_alpha is not None else None,
@@ -528,10 +687,44 @@ def main(
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     typer.echo(f"task: ear-level binary ({task.name})  train_ears={len(train_ds)} val_ears={len(val_ds)}  pos={pos_n} neg={neg_n} pos_weight={pos_weight}")
+    typer.echo(f"model: {model_type}  spec={model.spec.__dict__}")
     typer.echo(f"dicom_root: {dicom_root}")
     if used_cache_dir is not None:
         typer.echo(f"cache_dir: {used_cache_dir}")
     typer.echo(f"output: {out}")
+
+    wb = None
+    wb_run = None
+    if bool(wandb) and str(wandb_mode).lower() != "disabled":
+        try:
+            import wandb as _wandb
+
+            wb = _wandb
+            if str(wandb_mode).lower() == "online" and not os.environ.get("WANDB_API_KEY"):
+                typer.echo("wandb: WANDB_API_KEY 未设置；请先 export WANDB_API_KEY=...（或设置 WANDB_MODE=offline）")
+
+            name = str(wandb_name) if wandb_name else out.name
+            tags = [t.strip() for t in str(wandb_tags).split(",") if t.strip()]
+            wb_run = wb.init(
+                project=str(wandb_project),
+                entity=str(wandb_entity) if wandb_entity else None,
+                name=name,
+                group=str(wandb_group) if wandb_group else None,
+                tags=tags or None,
+                dir=str(wandb_dir),
+                mode=str(wandb_mode).lower(),
+                config=config,
+            )
+        except Exception as e:
+            typer.echo(f"wandb: init failed ({type(e).__name__}: {e}); continue without wandb")
+            wb = None
+            wb_run = None
+
+    early_stop_metric = str(early_stop_metric).strip().lower()
+    metric_alias = {
+        "acc": "accuracy",
+    }
+    early_stop_metric = metric_alias.get(early_stop_metric, early_stop_metric)
 
     metric_mode = "min" if early_stop_metric == "loss" else "max"
     best = float("inf") if metric_mode == "min" else float("-inf")
@@ -550,14 +743,23 @@ def main(
         t = float(step - warmup_steps) / float(max(1, total_steps - warmup_steps))
         return float(lr) * 0.5 * (1.0 + math.cos(math.pi * t))
 
+    def _get_backbone_module(m: torch.nn.Module) -> torch.nn.Module | None:
+        for name in ("backbone", "encoder", "unet"):
+            sub = getattr(m, name, None)
+            if isinstance(sub, torch.nn.Module):
+                return sub
+        return None
+
+    backbone_mod = _get_backbone_module(model)
+    if backbone_mod is None and int(freeze_backbone_epochs) > 0:
+        typer.echo("warning: freeze_backbone_epochs set but model has no recognized backbone/encoder/unet; skipping freeze")
+
     for epoch in range(1, int(epochs) + 1):
         # optional linear probe
-        if int(freeze_backbone_epochs) > 0 and epoch <= int(freeze_backbone_epochs):
-            for p in model.backbone.parameters():
-                p.requires_grad = False
-        else:
-            for p in model.backbone.parameters():
-                p.requires_grad = True
+        if backbone_mod is not None:
+            freeze_now = int(freeze_backbone_epochs) > 0 and int(epoch) <= int(freeze_backbone_epochs)
+            for p in backbone_mod.parameters():
+                p.requires_grad = not bool(freeze_now)
 
         model.train(True)
         train_losses: list[float] = []
@@ -586,6 +788,11 @@ def main(
                     intensity_prob=float(aug_intensity_prob),
                     noise_prob=float(aug_noise_prob),
                     gamma_prob=float(aug_gamma_prob),
+                    affine_prob=float(aug_affine_prob),
+                    affine_degrees=float(aug_affine_degrees),
+                    affine_translate=float(aug_affine_translate),
+                    affine_scale_low=float(aug_affine_scale_low),
+                    affine_scale_high=float(aug_affine_scale_high),
                 )
 
             amp_enabled = amp and device.type == "cuda"
@@ -666,9 +873,37 @@ def main(
         with log_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+        if wb_run is not None:
+            try:
+                lr_now = None
+                try:
+                    lr_now = float(optimizer.param_groups[0]["lr"])
+                except Exception:
+                    lr_now = None
+
+                wandb_metrics = {
+                    "epoch": int(epoch),
+                    "global_step": int(global_step),
+                    "lr": lr_now,
+                    "train/loss": float(train_m.get("loss")),
+                    "train/acc": train_m.get("accuracy"),
+                    "train/auroc": train_m.get("auroc"),
+                    "train/auprc": train_m.get("auprc"),
+                    "train/f1": train_m.get("f1"),
+                    "val/loss": float(val_m.get("loss")),
+                    "val/acc": val_m.get("accuracy"),
+                    "val/auroc": val_m.get("auroc"),
+                    "val/auprc": val_m.get("auprc"),
+                    "val/f1": val_m.get("f1"),
+                }
+                wandb_metrics = {k: v for k, v in wandb_metrics.items() if v is not None}
+                wb_run.log(wandb_metrics, step=int(epoch))
+            except Exception:
+                pass
+
         typer.echo(
-            f"epoch {epoch}: train_loss={train_m['loss']:.4f} auprc={train_m.get('auprc')}  "
-            f"val_loss={val_m['loss']:.4f} auprc={val_m.get('auprc')} sens@spec={val_m.get('sensitivity_at_spec')}"
+            f"epoch {epoch}: train_loss={train_m['loss']:.4f} acc={train_m.get('accuracy'):.3f}  "
+            f"val_loss={val_m['loss']:.4f} acc={val_m.get('accuracy'):.3f}"
         )
 
         ckpt = {
@@ -677,6 +912,7 @@ def main(
             "label_task": str(task.name),
             "pos_codes": tuple(int(x) for x in task.pos_codes),
             "neg_codes": tuple(int(x) for x in task.neg_codes),
+            "model_type": str(model_type),
             "model_spec": model.spec.__dict__,
             "state_dict": model.state_dict(),
             "config": config,
@@ -707,6 +943,12 @@ def main(
         if int(early_stop_patience) > 0 and bad >= int(early_stop_patience):
             typer.echo(f"early stopping: no improvement on {early_stop_metric} for {early_stop_patience} epochs")
             break
+
+    if wb_run is not None:
+        try:
+            wb_run.finish()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
